@@ -1,6 +1,11 @@
 # ================================================================
 # ⚠️ 已停用（2026-11-26）— 请勿再使用本流水线
 #
+# 本文件已改名为 .gitee-ci.yml.disabled：GiteeGo 只认仓库根目录的 .gitee-ci.yml，
+# 文件名一改流水线就不再触发（只加注释停用是无效的 —— GiteeGo 不读注释）。
+# 若仓库里仍留着旧名 .gitee-ci.yml，推 v* 标签会并行跑本流水线，
+# 与 GitHub Actions 在同一个码云 release 上重复上传制品。
+#
 # 唯一发布链路是 .github/workflows/release.yml（GitHub Actions）。停用原因：
 #   1. 本文件只构建 Linux 制品，产不出 Windows 自动更新清单（latest.yml + blockmap）
 #   2. 也不转存 MiMo CLI 归档 → 新装用户没有国内下载源

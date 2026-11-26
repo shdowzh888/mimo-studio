@@ -277,6 +277,11 @@ jobs:
             if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
               echo "OK: $NAME ($(( SIZE / 1048576 ))MB) -> $MSG"
               UPLOADED="$UPLOADED $NAME"
+            elif echo "$MSG" | grep -qE "已存在|already exists"; then
+              # 附件重名：码云不会覆盖同名附件（并发上传或重跑 workflow 时会撞上），
+              # 这里当成功处理，最终仍由资产列表核对兜底。
+              echo "DUP: $NAME 已存在（跳过上传）"
+              UPLOADED="$UPLOADED $NAME"
             else
               echo "FAIL: $NAME ($(( SIZE / 1048576 ))MB) http=$CODE $MSG"
               FAILED="$FAILED $NAME"

@@ -238,6 +238,15 @@ async function startViaSpawn() {
       args = ['serve', '--port', String(port)]
     }
 
+    // settle-once 守卫：listening / 启动即崩溃 / 10s 超时三条路径都可能走到，
+    // 只允许第一个落定结果生效（Promise 只 settle 一次），后续 no-op
+    let settled = false
+    const settle = (port) => {
+      if (settled) return
+      settled = true
+      resolve(port)
+    }
+
     try {
       mimoServeProcess = spawn(command, args, {
         stdio: 'pipe',
@@ -247,11 +256,15 @@ async function startViaSpawn() {
 
       mimoServeProcess.on('error', () => {
         mimoServeProcess = null
-        resolve(0)
+        settle(0)
       })
 
+      // 启动成功（已 settle）后的退出是 stopMimoServe 主动 kill 或运行期崩溃，只清标志；
+      // 启动前退出（二进制损坏/端口冲突/命令找不到）必须 settle(0)，
+      // 否则 Promise 永不结束 → mimo:startServer IPC 永久挂起
       mimoServeProcess.on('exit', () => {
         mimoServeProcess = null
+        settle(0)
         if (mimoServeReady) {
           mimoServeReady = false
           mimoServePort = 0
@@ -262,7 +275,7 @@ async function startViaSpawn() {
       const checkReady = (data) => {
         output += data.toString()
         if (output.includes('listening')) {
-          resolve(port)
+          settle(port)
         }
       }
       mimoServeProcess.stdout?.on('data', checkReady)
@@ -272,12 +285,12 @@ async function startViaSpawn() {
         if (mimoServeProcess && !mimoServeReady) {
           try { mimoServeProcess.kill() } catch {}
           mimoServeProcess = null
-          resolve(0)
+          settle(0)
         }
       }, 10_000)
 
     } catch {
-      resolve(0)
+      settle(0)
     }
   })
 }

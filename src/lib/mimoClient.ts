@@ -28,7 +28,12 @@ export class MimoClient {
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null
   private connecting = false
   private lastEventTime = 0
+  private reconnectAttempts = 0
   private connectionChangeHandlers = new Set<(connected: boolean) => void>()
+  // connect() 内联传入的连接回调：与公共订阅分开管理。
+  // connect() 语义上就是"开启一段新连接"，上一段连接遗留的内联回调必须一并退掉，
+  // 否则它们会一直留在集合里，每次连接状态变化都被重复触发。
+  private connectHandlers = new Set<(connected: boolean) => void>()
 
   // === 生命周期 ===
 
@@ -45,20 +50,41 @@ export class MimoClient {
    * 连接到 mimo serve
    * 启动 SSE 事件流，自动重连
    */
-  connect(port: number, password?: string, onConnectionChange?: (connected: boolean) => void) {
+  connect(port: number, password?: string, onConnectionChange?: (connected: boolean) => void): () => void {
     this.baseUrl = `http://127.0.0.1:${port}`
     this.password = password || ''
+    // 连接重置：新 connect 视为全新会话，清掉退避计数
+    this.reconnectAttempts = 0
+    // 先把上一条 SSE 流彻底中止：它的 abortController 即将被本次覆盖，
+    // 不主动中止的话旧流的读取循环会一直跑 —— 新旧两条流同时推送事件（事件双发），
+    // 且旧流再也收不到 abort，连接无法回收。
+    if (this.abortController) {
+      try { this.abortController.abort() } catch {}
+      this.abortController = null
+    }
+    this.connected = false
+    this.connecting = false
+    // 清掉可能挂起的 backoff 重连定时器：否则它在最多 8s 后会再触发一次 startSSE，
+    // 与本次并发产生两条 SSE 流
+    this.clearTimers()
+    // 退掉上一段连接遗留的内联回调，保证同一时刻只有一个活跃的连接回调
+    this.connectHandlers.clear()
+    let unsub: (() => void) | undefined
     if (onConnectionChange) {
-      this.connectionChangeHandlers.add(onConnectionChange)
+      this.connectHandlers.add(onConnectionChange)
+      unsub = () => this.connectHandlers.delete(onConnectionChange)
     }
     this.startSSE()
+    return unsub || (() => {})
   }
 
   /** 断开连接 */
   disconnect() {
     this.connected = false
     this.connecting = false
+    this.reconnectAttempts = 0
     this.clearTimers()
+    this.connectHandlers.clear()
     if (this.abortController) {
       this.abortController.abort()
       this.abortController = null
@@ -322,7 +348,11 @@ export class MimoClient {
     if (this.connecting) return
     this.connecting = true
 
-    this.abortController = new AbortController()
+    const controller = new AbortController()
+    this.abortController = controller
+    // 本次 SSE 的身份标记：若中途被更新的连接取代（abortController 换了人），
+    // 本次后续回调不再改共享状态，避免旧流把新连接的状态覆盖掉
+    const isCurrent = () => this.abortController === controller
 
     try {
       const url = `${this.baseUrl}/global/event`
@@ -336,7 +366,7 @@ export class MimoClient {
       const response = await fetch(url, {
         method: 'GET',
         headers,
-        signal: this.abortController.signal,
+        signal: controller.signal,
       })
 
       if (!response.ok) {
@@ -348,8 +378,13 @@ export class MimoClient {
         return
       }
 
+      // 已被更新的连接取代：本次流的成功结果作废（否则会误报 connected）
+      if (!isCurrent()) return
+
       this.connecting = false
       this.connected = true
+      // 连接成功，清掉退避计数
+      this.reconnectAttempts = 0
       this.notifyConnectionChange(true)
       this.resetHeartbeat()
 
@@ -370,6 +405,7 @@ export class MimoClient {
             const data = line.slice(6).trim()
             if (!data) continue
             try {
+              if (!isCurrent()) return
               const event: GlobalSSEEvent = JSON.parse(data)
               this.dispatchEvent(event)
               this.resetHeartbeat()
@@ -381,12 +417,16 @@ export class MimoClient {
       }
 
       // 流结束 — 非主动断开，尝试重连
+      // （已被更新的连接取代时直接退出：本次流不再拥有共享状态）
+      if (!isCurrent()) return
       if (this.connected) {
         this.connected = false
         this.notifyConnectionChange(false)
         this.scheduleReconnect()
       }
     } catch (err: unknown) {
+      // 已被更新的连接取代：本次不再改共享状态（否则旧流的收尾会覆盖新连接的状态）
+      if (!isCurrent()) return
       if (err instanceof Error && err.name === 'AbortError') {
         // 主动断开，不重连
         this.connecting = false
@@ -431,6 +471,9 @@ export class MimoClient {
   }
 
   private notifyConnectionChange(connected: boolean) {
+    for (const handler of this.connectHandlers) {
+      try { handler(connected) } catch (e) { console.error('[MimoClient] connect handler error:', e) }
+    }
     for (const handler of this.connectionChangeHandlers) {
       try { handler(connected) } catch (e) { console.error('[MimoClient] connection handler error:', e) }
     }
@@ -470,11 +513,16 @@ export class MimoClient {
     this.clearTimers()
     if (this.reconnectTimer) return
 
+    // 指数退避：250ms → 500 → 1s → 2s → 4s → 8s，封顶 8s
+    // 避免服务端长时间宕机时每 250ms 打一次请求
+    const delay = Math.min(250 * 2 ** this.reconnectAttempts, 8_000)
+    this.reconnectAttempts++
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connecting = false
       this.startSSE()
-    }, 250)
+    }, delay)
   }
 
   private clearTimers() {

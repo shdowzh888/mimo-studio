@@ -4,12 +4,6 @@
 
 import type {
   MessageWithParts,
-  Part,
-  StepFinishPart,
-  PermissionRequest,
-  FileDiff,
-  SessionStatusInfo,
-  SessionInfo,
   SSEEventPayload,
 } from '@/lib/mimoTypes'
 import type { ChatState } from './chatStore'
@@ -57,12 +51,11 @@ function applyDelta(
 }
 
 /**
- * 批量 delta 合并模式：直接 mutate state.messages 内部，不做中间不可变重建。
- * 由 chatStore 的 rAF 批量机制调用——每次 flush 前可对同一 part 的多次 delta 合并追加，
- * flush 时只做一次 set({ messages }) 触发一次 React 渲染。
+ * 批量 delta 合并模式：由 chatStore 的 rAF 批量机制调用——
+ * flush 前可对同一 part 的多次 delta 合并追加，flush 时只做一次 set({ messages }) 触发一次 React 渲染。
  *
- * 注意：此函数会 side-effect 修改 state.messages 引用内部的对象。
- *       只在 rAF 批量模式下安全使用（flush 完成后 set 一次即可）。
+ * 实现仍是不可变更新（重建目标 message + part 数组），与 applyDelta 一致；
+ * 区别在于由调用方批量攒 delta 后统一应用，避免每 token 一次不可变重建 + set。
  */
 export function applyMergedDelta(
   state: ChatState,
@@ -117,11 +110,13 @@ export function handlePartUpdated(
   if (!found) {
     // 消息容器还没建（message.updated 还没到），先占位创建
     // 后续 message.updated 会通过 handleMessageUpdated 补全 info
+    // part 先于 message.updated 到达时建占位消息。
+    // 这类 part 都是 assistant 流式产出（用户消息由 chatFlow 本地构造），role 固定 assistant。
     const placeholder: MessageWithParts = {
       info: {
         id: messageID,
         sessionID,
-        role: part.type === 'text' && !part.synthetic ? 'assistant' : 'assistant',
+        role: 'assistant',
         time: { created: Date.now() },
         agent: 'main',
         model: { providerID: '', modelID: '' },

@@ -159,11 +159,14 @@ async function sendViaDirectChat(
     parts: [{ type: 'text', id: crypto.randomUUID(), sessionID, messageID: userMsgId, text }],
   }
 
-  const providerId = state.currentProvider || 'openai'
+  let providerId = state.currentProvider || 'openai'
   let modelId = state.currentModel || ''
-  if (!modelId) {
+  // provider/model 必须同源：默认 provider 是 'mimo'（本应用内置 Agent），directChat 不认识它，
+  // 此时或未选模型时统一回落到 getDefaultProvider 的同源组合，避免 provider/model 错配
+  if (!modelId || providerId === 'mimo') {
     const dp = await getDefaultProvider()
     if (dp) {
+      providerId = dp.providerId
       modelId = dp.modelId
     } else {
       deps.set({ lastError: '未检测到可用的 AI Provider，请在设置中配置 API Key 或安装 MiMo CLI' })

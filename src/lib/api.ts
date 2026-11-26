@@ -34,10 +34,7 @@ export async function connectToServer(): Promise<boolean> {
       }
       if (status.running && status.port > 0) {
         console.log(`[API] Server already running on port ${status.port}`)
-        mimoClient.connect(status.port, status.password || '', (connected) => {
-          console.log(`[API] MimoClient connection: ${connected}`)
-          if (connected) syncKeysToServer()
-        })
+        connectClient(status.port, status.password || '')
         await waitForConnection(3000)
         if (mimoClient.isConnected) {
           log.info('[API] Connected to existing server')
@@ -63,10 +60,7 @@ export async function connectToServer(): Promise<boolean> {
           }
         } catch (e) { log.warn('[API] sync serveMode failed:', e) }
         if (result.port > 0) {
-          mimoClient.connect(result.port, result.password, (connected) => {
-            console.log(`[API] MimoClient connection: ${connected}`)
-            if (connected) syncKeysToServer()
-          })
+          connectClient(result.port, result.password)
         }
       }).catch(err => {
         log.error('[API] startServer error:', err)
@@ -83,6 +77,24 @@ export async function connectToServer(): Promise<boolean> {
 
   log.error('[API] connectToServer all retries failed')
   return false
+}
+
+/**
+ * connect() 注册的连接状态回调的退订句柄。
+ *
+ * connect() 每次调用都会往 MimoClient 的回调集合里追加一个新函数，且不会自动移除旧的那个。
+ * 若不主动退订，集合会随重连次数无限增长 —— 之后每次连接状态变化都会把历史回调全部触发一遍，
+ * 导致 syncKeysToServer 重复执行（把全部 API Key 反复下发到 mimo serve）。
+ * 这里显式接管订阅生命周期：建立新连接前先退掉上一次，保证同时只有一个活跃回调。
+ */
+let unsubscribeConnection: (() => void) | null = null
+
+function connectClient(port: number, password: string): void {
+  unsubscribeConnection?.()
+  unsubscribeConnection = mimoClient.connect(port, password, (connected) => {
+    console.log(`[API] MimoClient connection: ${connected}`)
+    if (connected) syncKeysToServer()
+  })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -130,7 +142,11 @@ export const settings = {
 // 窗口关闭时断开 SSE 连接
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', () => {
-    try { mimoClient.disconnect() } catch {}
+    try {
+      unsubscribeConnection?.()
+      unsubscribeConnection = null
+      mimoClient.disconnect()
+    } catch {}
   })
 }
 

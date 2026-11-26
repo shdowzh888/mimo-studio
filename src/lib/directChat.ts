@@ -6,7 +6,7 @@ import { isElectron, getAPI } from './ipc'
 import { loadAllApiKeys } from './secret'
 import { safeJsonParse } from './safeJson'
 import { PROVIDER_TEMPLATES } from '@/config/providerTemplates'
-import type { MessageWithParts, Part, TextPart, StepFinishPart } from './mimoTypes'
+import type { MessageWithParts, TextPart, StepFinishPart } from './mimoTypes'
 
 interface ProviderEntry {
   id: string

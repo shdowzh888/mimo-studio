@@ -1,7 +1,8 @@
 // mimoClient SSE 解析测试
 // 核心逻辑：从 ReadableStream 的原始文本中解析 data: 行 → JSON → 分发事件
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import { MimoClient } from '@/lib/mimoClient'
 
 // MimoClient 的 SSE 解析是私有的，但我们可以通过 on() 注册 handler
 // 然后模拟事件到达来验证。由于 startSSE 依赖 fetch，我们单独测试解析逻辑。
@@ -84,6 +85,85 @@ describe('SSE 解析', () => {
     expect(parseSSELines('')).toHaveLength(0)
     expect(parseSSEEvent('')).toBeNull()
     expect(parseSSEEvent('not json')).toBeNull()
+  })
+})
+
+/** 造一条不会自己结束的 SSE 流：收到 abort 时关闭，模拟服务端长连接 */
+function createSseStream(signal?: AbortSignal): ReadableStream {
+  return new ReadableStream({
+    start(controller) {
+      signal?.addEventListener('abort', () => {
+        try { controller.close() } catch {}
+      })
+    },
+  })
+}
+
+describe('连接生命周期', () => {
+  it('connect 重复调用时旧的内联回调被退订', async () => {
+    const client = new MimoClient()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: { signal: AbortSignal }) => {
+        return new Response(createSseStream(init.signal), { status: 200 })
+      })
+    )
+
+    const calls: string[] = []
+    client.connect(1111, '', () => calls.push('first'))
+    client.connect(2222, '', () => calls.push('second'))
+
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(calls).not.toContain('first')
+    expect(calls).toContain('second')
+
+    client.disconnect()
+    vi.unstubAllGlobals()
+  })
+
+  it('onConnectionChange 的公共订阅不被 connect 替换掉', async () => {
+    const client = new MimoClient()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: { signal: AbortSignal }) => {
+        return new Response(createSseStream(init.signal), { status: 200 })
+      })
+    )
+
+    const calls: boolean[] = []
+    client.onConnectionChange((c) => calls.push(c))
+    client.connect(3333, '')
+
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(calls).toContain(true)
+
+    client.disconnect()
+    vi.unstubAllGlobals()
+  })
+
+  it('重连时上一条 SSE 流被中止，不会同时存在两条流', async () => {
+    const client = new MimoClient()
+    const signals: AbortSignal[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: { signal: AbortSignal }) => {
+        signals.push(init.signal)
+        return new Response(createSseStream(init.signal), { status: 200 })
+      })
+    )
+
+    client.connect(4444, '')
+    await new Promise((r) => setTimeout(r, 20))
+    client.connect(5555, '')
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(signals).toHaveLength(2)
+    expect(signals[0].aborted).toBe(true)
+
+    client.disconnect()
+    vi.unstubAllGlobals()
   })
 })
 

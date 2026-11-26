@@ -46,7 +46,9 @@ export default tseslint.config(
     rules: {
       // 先只开 warn，不 block 构建
       '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      // ignoreRestSiblings：`const { type, ...rest } = payload` 是"省略某个键"的惯用写法，
+      // 被解构出来的 type 并不是未使用变量（默认配置会误报）
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', ignoreRestSiblings: true }],
       '@typescript-eslint/no-empty-object-type': 'off',
       '@typescript-eslint/ban-ts-comment': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',

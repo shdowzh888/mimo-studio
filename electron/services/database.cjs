@@ -101,8 +101,25 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp);
     `)
   },
+  // 2 -> 3: 清理废弃表
+  // 当前架构聊天数据在 mimo serve 侧，设置走 settings 表，API key 走 secret.cjs 的加密键。
+  // 以下五张表是旧直连时代遗留，全代码无任何读写（已核实），DROP 掉减少困惑。
+  // 注意：fresh install 仍会先建表（migration 0/1）再在此 DROP —— append-only 规则下
+  // 不改已发布 migration，这点一次性浪费可接受。
+  (db) => {
+    db.exec(`
+      DROP INDEX IF EXISTS idx_messages_conv_timestamp;
+      DROP INDEX IF EXISTS idx_messages_conversation_id;
+      DROP TABLE IF EXISTS messages;
+      DROP TABLE IF EXISTS conversations;
+      DROP TABLE IF EXISTS api_keys;
+      DROP TABLE IF EXISTS mcp_servers;
+      DROP TABLE IF EXISTS providers;
+    `)
+    console.log('[db] Dropped legacy tables: messages, conversations, api_keys, mcp_servers, providers')
+  },
   // 后续 migration 在此 push：
-  //   (db) => { db.exec('ALTER TABLE messages ADD COLUMN ...') }
+  //   (db) => { db.exec('ALTER TABLE ... ADD COLUMN ...') }
 ]
 
 function runMigrations(db) {

@@ -149,6 +149,48 @@ export interface ChatState {
   retryInit: () => void
 }
 
+// 轮询 listSkills 直到 mimo serve 就绪或超时（30 次 × 1s）
+// initSSE 的 server.connected 与 retryInit 共用，避免两份近乎复制的轮询逻辑分叉。
+// 防重入：SSE 重连/用户重试会并发启动多条链，用代际计数让旧链在过期后停止 setState，
+// 否则旧链的超时 error 会改写新链刚写入的 ready，状态机来回抖动。
+let pollGeneration = 0
+function pollUntilReady(get: () => ChatState, set: (partial: Partial<ChatState>) => void) {
+  const gen = ++pollGeneration
+  // 从当前 serverState 取 port/password/mode（disconnected 时填零/unknown）
+  const baseFromState = () => {
+    const s = get().serverState
+    return s.status !== 'disconnected'
+      ? { port: s.port, password: s.password, mode: s.mode }
+      : { port: 0, password: '', mode: 'unknown' }
+  }
+  set({ serverState: { status: 'initializing', ...baseFromState() } })
+
+  const checkReady = async (retries = 0) => {
+    if (gen !== pollGeneration) return // 已有更新的轮询启动，本链作废
+    const cur = baseFromState()
+    if (retries > 30) {
+      set({
+        serverState: {
+          status: 'error',
+          error: '初始化超时 — MiMo 服务未能在 30 秒内就绪，请检查网络连接后重试',
+          ...cur,
+        },
+      })
+      get().loadSessions()
+      return
+    }
+    try {
+      await mimoClient.listSkills()
+      if (gen !== pollGeneration) return // await 期间有新链启动，本链不得再写状态
+      set({ serverState: { status: 'ready', ...baseFromState() } })
+      get().loadSessions()
+    } catch {
+      setTimeout(() => checkReady(retries + 1), 1000)
+    }
+  }
+  checkReady()
+}
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   // === 连接状态 ===
   serverState: { status: 'disconnected' },
@@ -404,7 +446,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       rafId = null
       if (pendingDeltas.size === 0) return
       const state = get()
-      // 拷贝 messages 引用，避免污染原 state（applyMergedDelta 会 mutate parts）
+      // 逐条套用不可变更新：applyMergedDelta 不改原 state，只返回新的 messages
       let newMessages = state.messages
       let dirty = false
       for (const [, d] of pendingDeltas) {
@@ -491,43 +533,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // server.connected — 标记连接已建立，轮询直到初始化完成
     handlers.push(
       mimoClient.on('server.connected', () => {
-        const prev = get().serverState
-        const port = prev.status !== 'disconnected' ? prev.port : 0
-        const password = prev.status !== 'disconnected' ? prev.password : ''
-        const mode = prev.status !== 'disconnected' ? prev.mode : 'unknown'
-        set({ serverState: { status: 'initializing', port, password, mode } })
-        const checkReady = async (retries = 0) => {
-          if (retries > 30) {
-            const s = get().serverState
-            set({
-              serverState: {
-                status: 'error',
-                error: '初始化超时 — MiMo 服务未能在 30 秒内就绪，请检查网络连接后重试',
-                port: s.status !== 'disconnected' ? s.port : 0,
-                password: s.status !== 'disconnected' ? s.password : '',
-                mode: s.status !== 'disconnected' ? s.mode : 'unknown',
-              },
-            })
-            get().loadSessions()
-            return
-          }
-          try {
-            await mimoClient.listSkills()
-            const s = get().serverState
-            set({
-              serverState: {
-                status: 'ready',
-                port: s.status !== 'disconnected' ? s.port : 0,
-                password: s.status !== 'disconnected' ? s.password : '',
-                mode: s.status !== 'disconnected' ? s.mode : 'unknown',
-              },
-            })
-            get().loadSessions()
-          } catch {
-            setTimeout(() => checkReady(retries + 1), 1000)
-          }
-        }
-        checkReady()
+        pollUntilReady(get, set)
       }),
     )
 
@@ -537,32 +543,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   retryInit: () => {
-    const prev = get().serverState
-    const port = prev.status !== 'disconnected' ? prev.port : 0
-    const password = prev.status !== 'disconnected' ? prev.password : ''
-    const mode = prev.status !== 'disconnected' ? prev.mode : 'unknown'
-    set({ serverState: { status: 'initializing', port, password, mode } })
-    const checkReady = async (retries = 0) => {
-      if (retries > 30) {
-        set({
-          serverState: {
-            status: 'error',
-            error: '初始化超时 — MiMo 服务未能在 30 秒内就绪，请检查网络连接后重试',
-            port,
-            password,
-            mode,
-          },
-        })
-        return
-      }
-      try {
-        await mimoClient.listSkills()
-        set({ serverState: { status: 'ready', port, password, mode } })
-        get().loadSessions()
-      } catch {
-        setTimeout(() => checkReady(retries + 1), 1000)
-      }
-    }
-    checkReady()
+    pollUntilReady(get, set)
   },
 }))

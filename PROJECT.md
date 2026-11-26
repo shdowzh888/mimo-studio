@@ -1175,6 +1175,20 @@ window.__ZUSTAND__ = useChatStore.getState()
 - 发版：`git tag -a vX.X.X && git push github vX.X.X`（`github` remote = github.com/shdowzh/mimo-studio 镜像，与 origin(Gitee) 同 HEAD）。
 - 产物分工：GitHub Release 放多平台安装包 + `latest.yml`/`blockmap`（Windows 自动更新读它）；码云 release 只做国内下载分发，并托管转存的 CLI 归档。
 
+**码云 release job 的三个步骤**（`gitee-release`，顺序固定）
+
+1. **清理旧 release** —— 先删本仓库全部 release 记录再重建（配额原因，见下）。
+2. **确保标签存在** —— 码云建 release 要求 tag 已存在；码云主仓库若没同步本次代码，tag 会缺失 → CI 先按码云 main 的 SHA 建 tag（`POST /repos/{owner}/{repo}/tags`），再建 release。
+3. **上传并核对** —— 逐文件显式判 HTTP 码与响应体（200/201 才算成功），单个文件失败不中断本轮，最后回读 `GET /releases/{id}` 的资产列表核对缺失项，缺文件直接让 job 失败。
+
+**已知坑（v1.5.0 实测）**
+
+- v1.5.0 的 `gitee-release` job 失败（"Upload to Gitee Release" 步骤），码云 release 少了 90MB 的 `.deb`。
+  - 成因：上传写成 `curl ... | jq ...`，管道退出码取的是 jq 的 —— curl 挂了 jq 仍拿到空输入并返回 0，**上传失败被静默吞掉**；而 `set -e` 反而让后面的解析错误直接终止脚本，报错信息还指向错误的行。
+  - 现在改为显式判 HTTP 码 + 回读核对：宁可 job 变红，也不要静默少文件。
+- 码云单文件硬限 100MB → `.dmg`（109–113MB）与 `.AppImage`（116MB）会被跳过，**码云 release 上没有 macOS dmg 和 AppImage**，这两个需回 GitHub Release 下载。
+- `GITEE_TOKEN` secret 失效时码云一律返回 `{"message":"401 Unauthorized"}`，脚本会先校验 token 再干活，避免后面 jq 解析错误体时报出看不懂的错。
+
 **MiMo CLI 归档转存（国内下载源）**
 
 - CI 从上游 `XiaomiMiMo/MiMo-Code` 的固定 tag（`MIMO_CLI_VERSION`，当前 v0.1.17）拉归档，转存到本项目同名 tag 的码云 release；安装器按应用版本（`app.getVersion()`）寻址，CLI 版本由 CI 固定。

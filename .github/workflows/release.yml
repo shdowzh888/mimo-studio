@@ -144,7 +144,7 @@ jobs:
   gitee-release:
     needs: [macos, linux, windows, cli-assets]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/download-artifact@v4
 
@@ -162,67 +162,135 @@ jobs:
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          set -e
           API_BASE="https://gitee.com/api/v5/repos/shdowzh/mimo-studio"
           TOKEN="$GITEE_TOKEN"
+          [ -n "$TOKEN" ] || { echo "ERROR: 仓库未配置 GITEE_TOKEN secret"; exit 1; }
+
+          # 先校验 token：无效时码云一律返回 {"message":"401 Unauthorized"}，
+          # 后面 jq 解析错误体会很难懂，直接在这里报错退出。
+          WHO=$(curl -sS "$API_BASE/releases?access_token=$TOKEN&per_page=1" \
+            | jq -r 'if type == "array" then "ok" else (.message // "unknown") end' 2>/dev/null || echo "unknown")
+          if [ "$WHO" != "ok" ]; then
+            echo "ERROR: GITEE_TOKEN 不可用（码云返回: $WHO）"
+            exit 1
+          fi
 
           echo "==> 清理旧 release（码云配额 1GB，发版前腾空间）"
-          curl -s "$API_BASE/releases?access_token=$TOKEN&per_page=100" | \
-            jq -r '.[] | "\(.id) \(.tag_name)"' | \
-          while read -r ID NAME; do
-            [ -z "$ID" ] && continue
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
-              "$API_BASE/releases/$ID?access_token=$TOKEN" || true)
-            if [ "$CODE" = "200" ] || [ "$CODE" = "204" ] || [ "$CODE" = "404" ]; then
-              echo "    已删除 release $NAME (id=$ID)"
-            else
-              echo "    WARN 删除失败 ($CODE): $NAME (id=$ID)"
-            fi
-          done
+          curl -sS "$API_BASE/releases?access_token=$TOKEN&per_page=100" \
+            | jq -r '.[]? | "\(.id) \(.tag_name)"' 2>/dev/null \
+            | while read -r ID NAME; do
+                [ -z "$ID" ] && continue
+                CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+                  "$API_BASE/releases/$ID?access_token=$TOKEN" 2>/dev/null || true)
+                case "$CODE" in
+                  200|204|404) echo "    已删除 release $NAME (id=$ID)" ;;
+                  *) echo "    WARN 删除失败 ($CODE): $NAME (id=$ID)" ;;
+                esac
+              done
           echo "==> 清理完成，下面会重建当前版本的 release"
 
+      # 码云主仓库可能没同步本次代码（国内镜像滞后），而码云建 release 要求标签已存在；
+      # 标签缺失时建 release 会直接失败 → 先确保标签存在（已存在则跳过）。
+      - name: Ensure Gitee tag exists
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          API_BASE="https://gitee.com/api/v5/repos/shdowzh/mimo-studio"
+          TOKEN="$GITEE_TOKEN"
+          TAG="${{ github.ref_name }}"
+          [ -n "$TOKEN" ] || { echo "ERROR: 仓库未配置 GITEE_TOKEN secret"; exit 1; }
+
+          COUNT=$(curl -sS "$API_BASE/tags?access_token=$TOKEN&per_page=100" \
+            | jq -r --arg t "$TAG" '[.[]? | select(.name==$t)] | length' 2>/dev/null || echo 0)
+          if [ "${COUNT:-0}" != "0" ]; then
+            echo "==> 码云标签 $TAG 已存在"
+            exit 0
+          fi
+
+          echo "==> 创建码云标签 $TAG（指向码云 main）"
+          SHA=$(curl -sS "$API_BASE/branches/main?access_token=$TOKEN" \
+            | jq -r '.commit.sha // empty' 2>/dev/null || true)
+          if [ -z "$SHA" ]; then
+            echo "ERROR: 取不到码云 main 分支 SHA，无法创建标签"
+            exit 1
+          fi
+          RESP=$(curl -sS -X POST "$API_BASE/tags?access_token=$TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"$TAG\",\"message\":\"Release $TAG\",\"ref\":\"main\",\"sha\":\"$SHA\"}" || true)
+          if echo "$RESP" | jq -e '.tag_name' >/dev/null 2>&1; then
+            echo "==> 标签已创建: $TAG -> $SHA"
+          else
+            echo "ERROR: 创建码云标签失败: $RESP"
+            exit 1
+          fi
+
+      # 上传资产：单文件失败不中断本轮，最后统一回读核对。
+      # v1.5.0 就是在这里把 90MB 的 .deb 静默漏掉了（curl 失败但管道里 jq 退出码为 0），
+      # 所以这里显式判 HTTP 码 + 响应体，并在末尾拉取资产列表核对缺失项。
       - name: Upload to Gitee Release
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          set -e
-          TAG="${{ github.ref_name }}"
-          TAG_NUM="${TAG#v}"
           API_BASE="https://gitee.com/api/v5/repos/shdowzh/mimo-studio"
           TOKEN="$GITEE_TOKEN"
+          TAG="${{ github.ref_name }}"
+          TAG_NUM="${TAG#v}"
+          LIMIT=104857600
 
-          echo "==> Tag: $TAG  Version: $TAG_NUM"
+          [ -n "$TOKEN" ] || { echo "ERROR: 仓库未配置 GITEE_TOKEN secret"; exit 1; }
 
-          # 1. Find or create release
-          RELEASES=$(curl -s "$API_BASE/releases?access_token=$TOKEN&per_page=50")
-          RELEASE_ID=$(echo "$RELEASES" | jq -r '.[] | select(.tag_name=="'"$TAG"'") | .id // empty')
+          # 1. 找或建 release（解析失败时打印原文再退出，别让 jq 报错误导步骤失败）
+          RELEASES=$(curl -sS "$API_BASE/releases?access_token=$TOKEN&per_page=50" || true)
+          RELEASE_ID=$(printf '%s' "$RELEASES" \
+            | jq -r --arg t "$TAG" '[.[]? | select(.tag_name==$t)][0].id // empty' 2>/dev/null || true)
 
           if [ -z "$RELEASE_ID" ]; then
-            echo "==> Creating Gitee release for $TAG..."
-            RESP=$(curl -s -X POST "$API_BASE/releases?access_token=$TOKEN" \
+            echo "==> 创建码云 release: $TAG"
+            RESP=$(curl -sS -X POST "$API_BASE/releases?access_token=$TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"tag_name\":\"$TAG\",\"name\":\"MiMo Studio $TAG_NUM\",\"body\":\"Release $TAG_NUM\",\"prerelease\":false,\"target_commitish\":\"main\"}")
-            RELEASE_ID=$(echo "$RESP" | jq -r '.id // empty')
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"MiMo Studio $TAG_NUM\",\"body\":\"Release $TAG_NUM\",\"prerelease\":false,\"target_commitish\":\"main\"}" || true)
+            RELEASE_ID=$(printf '%s' "$RESP" | jq -r '.id // empty' 2>/dev/null || true)
             if [ -z "$RELEASE_ID" ]; then
-              echo "ERROR: Failed to create release. Response:"
-              echo "$RESP" | head -5
+              echo "ERROR: 创建码云 release 失败: $RESP"
               exit 1
             fi
           fi
           echo "==> Release ID: $RELEASE_ID"
 
-          # 2. Upload all assets (skip > 100MB for Gitee limit)
-          #    curl 加超时 + 重试，避免上传挂起导致 job 无限空转
-          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.tar.xz" -o -name "mimocode-*" -o -name "SHA256SUMS" \) | while read -r f; do
+          # 2. 逐个上传（>100MB 跳过：码云单文件硬限制）
+          UPLOADED=""
+          SKIPPED=""
+          FAILED=""
+          while IFS= read -r f; do
+            NAME="$(basename "$f")"
             SIZE=$(stat -c%s "$f")
-            if [ "$SIZE" -gt 104857600 ]; then
-              echo "SKIP (>100MB): $f ($(( SIZE / 1048576 ))MB)"
-            else
-              echo "UPLOAD: $f ($(( SIZE / 1048576 ))MB)"
-              curl -sS --max-time 600 --retry 3 --retry-delay 5 --retry-all-errors \
-                -X POST "$API_BASE/releases/$RELEASE_ID/attach_files?access_token=$TOKEN" \
-                -F "file=@$f" | jq -r '.name + " -> " + .browser_download_url' \
-                || echo "WARN: upload failed for $f (continuing)"
+            if [ "$SIZE" -gt "$LIMIT" ]; then
+              echo "SKIP (>100MB): $NAME ($(( SIZE / 1048576 ))MB)"
+              SKIPPED="$SKIPPED $NAME"
+              continue
             fi
-          done
-          echo "==> Done."
+            CODE=$(curl -sS -o /tmp/gitee_asset.json -w '%{http_code}' --max-time 900 \
+              --retry 3 --retry-delay 5 --retry-all-errors \
+              -X POST "$API_BASE/releases/$RELEASE_ID/attach_files?access_token=$TOKEN" \
+              -F "file=@$f" 2>/dev/null || true)
+            MSG=$(jq -r '.browser_download_url // .message // empty' /tmp/gitee_asset.json 2>/dev/null || true)
+            if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
+              echo "OK: $NAME ($(( SIZE / 1048576 ))MB) -> $MSG"
+              UPLOADED="$UPLOADED $NAME"
+            else
+              echo "FAIL: $NAME ($(( SIZE / 1048576 ))MB) http=$CODE $MSG"
+              FAILED="$FAILED $NAME"
+            fi
+          done < <(find . -path ./.git -prune -o -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.tar.xz" -o -name "mimocode-*" -o -name "SHA256SUMS" \) -print | sort)
+
+          # 3. 回读资产列表核对
+          echo "==> 码云 release 当前资产："
+          curl -sS "$API_BASE/releases/$RELEASE_ID?access_token=$TOKEN" \
+            | jq -r '.assets[]?.name' 2>/dev/null | sed 's/^/    /' || true
+
+          if [ -n "$FAILED" ]; then
+            echo "ERROR: 以下文件上传失败（码云 release 不完整）:$FAILED"
+            exit 1
+          fi
+          echo "==> Done. 已上传:$UPLOADED"
+          [ -n "$SKIPPED" ] && echo "==> 跳过(>100MB 码云限制):$SKIPPED"

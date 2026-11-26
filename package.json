@@ -45,7 +45,6 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "cli/**/*",
       "opencode-dist/**/*"
     ],
     "asar": true,

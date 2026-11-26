@@ -3,24 +3,36 @@
 // 1. 检测 PATH 中是否已有 mimo（任何来源）
 // 2. 检测 ~/.mimocode/bin/mimo（curl 安装脚本位置）
 // 3. 都没有 → 从 app 内置 CLI 拷贝（秒装，无需网络）
-// 4. 内置不可用 → 从 Gitee 镜像下载（国内快）
-// 5. Gitee 失败 → GitHub Releases
-// 6. 都失败 → npm install -g（需要 Node.js）
+// 4. 内置不可用 → 从本项目自有 Gitee release 下载（CI 发版时从上游转存，国内快）
+// 5. 自有码云资产缺失 → GitHub Releases（国际网络）
+// 6. 都失败 → npm 装到用户目录再提取平台二进制（无需全局写权限）
 
 const { exec, execFile, execFileSync } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const https = require('https')
+const crypto = require('crypto')
 const { createWriteStream, mkdirSync, existsSync, rmSync } = require('fs')
 const { getMimoDataDir } = require('./database.cjs')
 
-// 下载源优先级：Gitee 镜像（国内快）→ GitHub（国际）
-const GITEE_RELEASE_BASE = 'https://gitee.com/mirrors/mimocode/releases/download'
+// 下载源优先级：自有 Gitee release（CI 从上游转存的 CLI 归档，国内快）→ GitHub 上游（国际）
+// 注意：官方镜像 gitee.com/mirrors/mimocode 只同步 git 数据、不同步 release 附件
+// （实测全版本资产 404），不可作为下载源。
+const SELF_GITEE_RELEASE_BASE = 'https://gitee.com/shdowzh/mimo-studio/releases/download'
 const GITHUB_RELEASE_BASE = 'https://github.com/XiaomiMiMo/MiMo-Code/releases/latest/download'
 
-// CLI 版本号（可通过 MIMO_CLI_VERSION 环境变量覆盖，方便发版同步）
-const CLI_VERSION = process.env.MIMO_CLI_VERSION || 'v0.1.0'
+// CLI 归档随应用发版由 CI 转存到同名 tag 的 release 下，因此自有码云源的 URL
+// 只依赖应用自身版本（app.getVersion()）；上游 CLI 的具体版本在
+// .github/workflows/release.yml 的 MIMO_CLI_VERSION 中固定。
+function getAppTag() {
+  try {
+    const { app } = require('electron')
+    return `v${app.getVersion()}`
+  } catch {
+    return null // 非 Electron 环境（单测等）取不到，跳过自有码云源
+  }
+}
 
 /**
  * 根据当前平台获取预编译二进制的下载文件名
@@ -44,7 +56,8 @@ function getAssetName() {
  */
 function detect() {
   return new Promise((resolve) => {
-    exec('mimo --version', (error, stdout) => {
+    // timeout：PATH 中若存在挂死的同名 shim（杀软拦截/坏脚本），避免启动检测永久阻塞
+    exec('mimo --version', { timeout: 5000 }, (error, stdout) => {
       if (!error && stdout.trim()) {
         resolve({ installed: true, version: stdout.trim(), source: 'path' })
         return
@@ -56,7 +69,7 @@ function detect() {
       const binPath = path.join(binDir, binName)
 
       if (existsSync(binPath)) {
-        execFile(binPath, ['--version'], (err2, stdout2) => {
+        execFile(binPath, ['--version'], { timeout: 5000 }, (err2, stdout2) => {
           if (!err2 && stdout2.trim()) {
             resolve({ installed: true, version: stdout2.trim(), path: binPath, source: 'local-bin' })
           } else {
@@ -162,6 +175,13 @@ function installFromUrl(downloadUrl, eventSender) {
         }
       })
 
+      // 阶段间隙自查取消标记：整体超时后不再浪费校验/解压/拷贝，避免覆盖 bin 目录
+      if (installCancelled) throw new Error('已取消（整体超时）')
+
+      // 完整性校验：比对同 release 下的 SHA256SUMS；不匹配则删除归档并拒绝解压执行
+      await verifyArchiveIntegrity(archivePath, downloadUrl, assetName, sendProgress)
+
+      if (installCancelled) throw new Error('已取消（整体超时）')
       sendProgress('下载完成，正在解压...')
 
       if (isZip) {
@@ -169,6 +189,8 @@ function installFromUrl(downloadUrl, eventSender) {
       } else {
         await extractTarGz(archivePath, tempDir)
       }
+
+      if (installCancelled) throw new Error('已取消（整体超时）')
 
       const mimoBinName = isWin ? 'mimo.exe' : 'mimo'
       let mimoBinPath = findFile(tempDir, mimoBinName)
@@ -185,15 +207,7 @@ function installFromUrl(downloadUrl, eventSender) {
       const destPath = path.join(binDir, mimoBinName)
       if (existsSync(destPath)) rmSync(destPath)
 
-      const srcName = path.basename(mimoBinPath)
       copyFileSync(mimoBinPath, destPath)
-
-      if (srcName.startsWith('mimocode')) {
-        const aliasPath = path.join(binDir, mimoBinName)
-        if (!existsSync(aliasPath) || aliasPath === destPath) {
-          copyFileSync(mimoBinPath, aliasPath)
-        }
-      }
 
       if (!isWin) {
         try { fs.chmodSync(destPath, 0o755) } catch {}
@@ -227,15 +241,55 @@ function findFile(dir, fileName) {
 }
 
 /**
- * npm 全局安装（最后手段）
+ * npm 安装到用户目录再提取二进制（最后手段）
+ * 不用 -g：Windows 全局目录通常需要管理员权限，普通用户必失败；
+ * --prefix 装到数据目录后，从 @mimo-ai/mimocode-* 平台包中取出真实二进制。
  */
 function installFromNpm(eventSender) {
   return new Promise((resolve, reject) => {
+    const sendProgress = (msg) => {
+      if (eventSender && !eventSender.isDestroyed()) {
+        eventSender.send('mimo:installProgress', { stdout: msg })
+      }
+    }
+
     const isWin = os.platform() === 'win32'
     const cmd = isWin ? 'npm.cmd' : 'npm'
-    const child = exec(`${cmd} install -g @mimo-ai/cli`, (error) => {
-      if (error) reject(error)
-      else resolve()
+    const prefixDir = path.join(getMimoDataDir(), '.npm-cli')
+    const binName = isWin ? 'mimo.exe' : 'mimo'
+
+    try { mkdirSync(prefixDir, { recursive: true }) } catch {}
+
+    // timeout：npm 网络卡死时兜底（外层 install() 另有整体 5 分钟 race）
+    const child = exec(`${cmd} install --prefix "${prefixDir}" @mimo-ai/cli`, { timeout: 180000 }, (error) => {
+      if (error) { reject(error); return }
+      try {
+        // 真实二进制在平台子包（@mimo-ai/mimocode-<platform>）里，cli 主包只有 JS shim
+        const scopeDir = path.join(prefixDir, 'node_modules', '@mimo-ai')
+        let binPath = null
+        for (const entry of fs.readdirSync(scopeDir, { withFileTypes: true })) {
+          if (!entry.isDirectory() || !entry.name.startsWith('mimocode-')) continue
+          const pkgDir = path.join(scopeDir, entry.name)
+          const found = findFile(pkgDir, binName) || findFile(pkgDir, isWin ? 'mimocode.exe' : 'mimocode')
+          // >1MB 才是原生二进制，排除误命中脚本文件
+          if (found && fs.statSync(found).size > 1024 * 1024) { binPath = found; break }
+        }
+        if (!binPath) {
+          reject(new Error('npm 安装完成但未找到平台二进制'))
+          return
+        }
+        const binDir = path.join(getMimoDataDir(), 'bin')
+        if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true })
+        const destPath = path.join(binDir, binName)
+        if (existsSync(destPath)) rmSync(destPath)
+        copyFileSync(binPath, destPath)
+        if (!isWin) { try { fs.chmodSync(destPath, 0o755) } catch {} }
+        try { rmSync(prefixDir, { recursive: true, force: true }) } catch {}
+        sendProgress('MiMo CLI 安装完成！')
+        resolve()
+      } catch (err) {
+        reject(err)
+      }
     })
     child.stdout?.on('data', (data) => {
       if (eventSender && !eventSender.isDestroyed()) {
@@ -250,8 +304,12 @@ function installFromNpm(eventSender) {
   })
 }
 
+// 整体超时置位后，仍在跑的下载/解压链在阶段间隙自查此标记并中止，
+// 避免 Promise.race 超时报错后僵尸任务继续解压、覆盖 bin 目录
+let installCancelled = false
+
 /**
- * 智能安装：内置 → Gitee 镜像（重试2次）→ GitHub（重试2次）→ npm
+ * 智能安装：内置 → 自有 Gitee release（重试2次）→ GitHub（重试2次）→ npm 用户目录
  * 整体超时 5 分钟
  */
 async function install(eventSender) {
@@ -273,17 +331,20 @@ async function install(eventSender) {
       // 无内置，继续
     }
 
-    // 2. Gitee 镜像（国内快），重试 PER_SOURCE_RETRIES 次
+    // 2. 自有 Gitee release（CI 发版时从上游转存的归档，国内快），重试 PER_SOURCE_RETRIES 次
     const assetName = getAssetName()
-    const giteeUrl = `${GITEE_RELEASE_BASE}/${CLI_VERSION}/${assetName}`
-    for (let i = 0; i < PER_SOURCE_RETRIES; i++) {
-      try {
-        if (i > 0) sendProgress(`Gitee 重试 (${i + 1}/${PER_SOURCE_RETRIES})...`)
-        await installFromUrl(giteeUrl, eventSender)
-        return
-      } catch (e) {
-        console.log(`[installer] Gitee attempt ${i + 1} failed: ${e.message}`)
-        if (i < PER_SOURCE_RETRIES - 1) await sleep(2000)
+    const appTag = getAppTag()
+    if (appTag) {
+      const giteeUrl = `${SELF_GITEE_RELEASE_BASE}/${appTag}/${assetName}`
+      for (let i = 0; i < PER_SOURCE_RETRIES; i++) {
+        try {
+          if (i > 0) sendProgress(`Gitee 重试 (${i + 1}/${PER_SOURCE_RETRIES})...`)
+          await installFromUrl(giteeUrl, eventSender)
+          return
+        } catch (e) {
+          console.log(`[installer] Gitee(${appTag}) attempt ${i + 1} failed: ${e.message}`)
+          if (i < PER_SOURCE_RETRIES - 1) await sleep(2000)
+        }
       }
     }
 
@@ -300,13 +361,18 @@ async function install(eventSender) {
       }
     }
 
-    // 4. npm 全局安装（最后手段，不重试）
+    // 4. npm 用户目录安装（最后手段，不重试）
     sendProgress('所有下载源均已尝试，正在通过 npm 安装...')
     await installFromNpm(eventSender)
   })()
 
+  installCancelled = false // 新一轮安装开始，清除上一次的超时标记
+  let timeoutId = null
   const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('安装超时（5分钟），请检查网络连接后重试')), INSTALL_TIMEOUT)
+    timeoutId = setTimeout(() => {
+      installCancelled = true
+      reject(new Error('安装超时（5分钟），请检查网络连接后重试'))
+    }, INSTALL_TIMEOUT)
   })
 
   try {
@@ -314,6 +380,9 @@ async function install(eventSender) {
   } catch (e) {
     sendProgress(e.message)
     throw e
+  } finally {
+    // 安装已完成或已失败 → 撤掉超时定时器，避免残留一个 5 分钟的挂起 timer
+    if (timeoutId) clearTimeout(timeoutId)
   }
 }
 
@@ -378,6 +447,93 @@ function downloadFile(url, destPath, onProgress) {
     }
     follow(url)
   })
+}
+
+// === 完整性校验 ===
+
+// 流式分块计算文件 SHA256，避免大归档一次性占内存
+function sha256File(filePath) {
+  const h = crypto.createHash('sha256')
+  const fd = fs.openSync(filePath, 'r')
+  const buf = Buffer.alloc(64 * 1024)
+  try {
+    let bytes
+    while ((bytes = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      h.update(buf.slice(0, bytes))
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+  return h.digest('hex')
+}
+
+// GET 文本响应（跟随重定向），用于拉取 SHA256SUMS
+function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    const follow = (currentUrl, redirects = 0) => {
+      if (redirects > 10) { reject(new Error('Too many redirects')); return }
+      const mod = currentUrl.startsWith('https') ? https : require('http')
+      const req = mod.get(currentUrl, { timeout: 10000 }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume()
+          follow(res.headers.location, redirects + 1)
+          return
+        }
+        if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return }
+        let body = ''
+        res.setEncoding('utf-8')
+        res.on('data', (c) => { body += c })
+        res.on('end', () => resolve(body))
+      })
+      req.on('error', reject)
+      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')) })
+    }
+    follow(url)
+  })
+}
+
+// 解析 SHA256SUMS：行格式 "<hash>  <filename>"，返回匹配 assetName 的哈希（小写）
+function matchSumsEntry(sumsBody, assetName) {
+  for (const line of sumsBody.split(/\r?\n/)) {
+    const m = line.match(/^([0-9a-fA-F]{64})\s+\*?(\S+)\s*$/)
+    if (m && (m[2] === assetName || m[2].endsWith('/' + assetName))) {
+      return m[1].toLowerCase()
+    }
+  }
+  return null
+}
+
+/**
+ * 比对归档 SHA256 与同 release 目录下的 SHA256SUMS。
+ * - sums 可用且资产被列出：不匹配 → 删归档并抛错，拒绝执行可能被篡改的二进制
+ * - sums 不可用 / 资产未列出：记录计算出的哈希（warn）后放行
+ *
+ * fail-open 取舍：auto-install 场景下 fail-closed 会让无 sums 的版本完全无法安装；
+ * 上游未必每版都附 sums，故"有则强校验、无则记日志放行"。
+ */
+async function verifyArchiveIntegrity(archivePath, downloadUrl, assetName, sendProgress) {
+  const actual = sha256File(archivePath)
+  const sumsUrl = downloadUrl.replace(/\/[^/]+$/, '/SHA256SUMS')
+
+  let sumsBody = null
+  try {
+    sumsBody = await fetchText(sumsUrl)
+  } catch (e) {
+    sendProgress(`[warn] 未取到 SHA256SUMS (${e.message})，已记录哈希 ${actual}，跳过校验`)
+    return
+  }
+  const expected = matchSumsEntry(sumsBody, assetName)
+  if (!expected) {
+    sendProgress(`[warn] SHA256SUMS 中无 ${assetName}，已记录哈希 ${actual}，跳过校验`)
+    return
+  }
+  if (expected !== actual) {
+    try { rmSync(archivePath, { force: true }) } catch {}
+    const err = new Error(`SHA256 校验失败：期望 ${expected}，实际 ${actual} — 拒绝执行可能被篡改的二进制`)
+    sendProgress(`[error] ${err.message}`)
+    throw err
+  }
+  sendProgress(`SHA256 校验通过 (${actual.slice(0, 12)}…)`)
 }
 
 function extractZip(archivePath, destDir) {

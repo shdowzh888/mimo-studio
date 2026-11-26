@@ -9,16 +9,18 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm install
+      - run: npm ci
       - name: Lint
         run: npm run lint
       - name: Typecheck
-        run: npm run typecheck -- --pretty 2>&1 | true
+        # 注意：不要加 `| true` 吞退出码 —— 那会让门失效（曾因此 typecheck 无论成败都绿）
+        run: npm run typecheck
       - name: Test
         run: npm test
       - name: Build (Vite)

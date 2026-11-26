@@ -20,7 +20,7 @@ jobs:
         with: { node-version: '22' }
       - run: npm install
       - run: npx vite build
-      # 不内置 MiMo CLI — 用户首次启动时自动下载（优先码云镜像）
+      # 不内置 MiMo CLI — 用户首次启动时自动下载（优先自有码云 release 资产）
       - name: Build macOS (${{ matrix.arch }})
         run: npx electron-builder --mac --${{ matrix.arch }} --publish never
       - uses: actions/upload-artifact@v4
@@ -44,7 +44,7 @@ jobs:
           sudo gem install fpm
       - run: npm install
       - run: npx vite build
-      # 不内置 MiMo CLI — 用户首次启动时自动下载（优先码云镜像）
+      # 不内置 MiMo CLI — 用户首次启动时自动下载（优先自有码云 release 资产）
       - name: Build Linux
         run: npx electron-builder --linux AppImage deb tar.xz --publish never
       - uses: actions/upload-artifact@v4
@@ -69,13 +69,56 @@ jobs:
         with: { node-version: '22' }
       - run: npm install
       - run: npx vite build
-      # 不内置 MiMo CLI — 用户首次启动时自动下载（优先码云镜像）
+      # 不内置 MiMo CLI — 用户首次启动时自动下载（优先自有码云 release 资产）
       - name: Build Windows
         run: npx electron-builder --win --publish never
+      # 只上传 Windows 的更新元数据（latest.yml + blockmap）：
+      # Linux 构建同样生成 latest.yml，若也上传会与 Windows 的同名资产在
+      # GitHub Release 上互相覆盖（各指各的平台文件），Windows 更新会读到 Linux 的清单而失效。
+      # macOS 未签名无法自动更新，latest-mac.yml 暂不上传。
       - uses: actions/upload-artifact@v4
         with:
           name: windows-setup
-          path: release/MiMo-Studio-Setup-*.exe
+          path: |
+            release/MiMo-Studio-Setup-*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+
+  # ── MiMo CLI 归档转存（自有码云 release 的国内下载源）──────
+  # 官方镜像 gitee.com/mirrors/mimocode 不同步 release 附件（实测全版本 404），
+  # 故 CI 从上游拉归档转存到本项目同名 release，安装器按应用 tag 寻址。
+  # 上游出新版时同步 bump MIMO_CLI_VERSION（版本号必须真实存在，否则 curl 404 → 整个发版 job 挂）。
+  # 四件套约 157MB/版（win-x64 46 + darwin-arm64 32 + darwin-x64 35 + linux-x64 44），
+  # 码云总配额 1GB → 发新版前务必删掉旧 release 的 mimocode-* 资产（见 AGENTS.md 的删旧 release 约定）。
+  # 平台覆盖 = 应用实际发布的平台：macOS 同时发 x64 与 arm64，Windows/Linux 只发 x64。
+  cli-assets:
+    runs-on: ubuntu-latest
+    env:
+      MIMO_CLI_VERSION: v0.1.17
+    steps:
+      - name: Download upstream CLI archives
+        run: |
+          set -e
+          mkdir -p cli-assets && cd cli-assets
+          BASE="https://github.com/XiaomiMiMo/MiMo-Code/releases/download/${MIMO_CLI_VERSION}"
+          curl -fSL --retry 3 --retry-delay 5 -o mimocode-windows-x64.zip  "$BASE/mimocode-windows-x64.zip"
+          curl -fSL --retry 3 --retry-delay 5 -o mimocode-darwin-arm64.zip "$BASE/mimocode-darwin-arm64.zip"
+          curl -fSL --retry 3 --retry-delay 5 -o mimocode-darwin-x64.zip   "$BASE/mimocode-darwin-x64.zip"
+          curl -fSL --retry 3 --retry-delay 5 -o mimocode-linux-x64.tar.gz "$BASE/mimocode-linux-x64.tar.gz"
+          # 上游为 MIT 许可：再分发二进制必须附带许可声明（tag 里没有就回退 main）
+          curl -fSL --retry 3 --retry-delay 5 -o mimocode-LICENSE.txt \
+            "https://raw.githubusercontent.com/XiaomiMiMo/MiMo-Code/${MIMO_CLI_VERSION}/LICENSE" \
+            || curl -fSL --retry 3 --retry-delay 5 -o mimocode-LICENSE.txt \
+            "https://raw.githubusercontent.com/XiaomiMiMo/MiMo-Code/main/LICENSE"
+      - name: Generate SHA256SUMS
+        run: |
+          cd cli-assets
+          sha256sum mimocode-windows-x64.zip mimocode-darwin-arm64.zip mimocode-darwin-x64.zip mimocode-linux-x64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mimo-cli-assets
+          path: cli-assets/*
 
   # ── GitHub Release ─────────────────────────────────────
   github-release:
@@ -94,15 +137,49 @@ jobs:
             **/*.AppImage
             **/*.deb
             **/*.tar.xz
+            **/latest*.yml
           generate_release_notes: true
 
   # ── Gitee Release (aggregator) ───────────────────────────
   gitee-release:
-    needs: [macos, linux, windows]
+    needs: [macos, linux, windows, cli-assets]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/download-artifact@v4
+
+      # 码云附件总配额只有 1GB：应用制品约 400MB + CLI 归档 157MB ≈ 560MB/版本，
+      # 装不下两个版本 —— 不清理的话新版本上传会直接失败。
+      # 码云 API v5 没有"删除单个附件"的端点（实测 DELETE /attach_files/{name} → 404），
+      # 只能整体删除 release（DELETE /releases/{id} 带 token 可用）。所以策略是：
+      #   发版前清空本仓库的 release 记录 → 下面步骤重建当前版本并上传全部资产。
+      # 副作用（可接受）：
+      #   1. 码云上只保留最新版的 release 页面；历史版本安装包在 GitHub Release 仍有；
+      #   2. 旧 tag 的 release 源码包链接失效（tag 与源码本身不受影响）；
+      #   3. 当前版本重建为全新 release，重跑 workflow 不会撞同名附件。
+      # 删除失败只告警不阻断（真正超配额会在上传步骤明确报错）。
+      - name: Clean up old Gitee releases (quota)
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -e
+          API_BASE="https://gitee.com/api/v5/repos/shdowzh/mimo-studio"
+          TOKEN="$GITEE_TOKEN"
+
+          echo "==> 清理旧 release（码云配额 1GB，发版前腾空间）"
+          curl -s "$API_BASE/releases?access_token=$TOKEN&per_page=100" | \
+            jq -r '.[] | "\(.id) \(.tag_name)"' | \
+          while read -r ID NAME; do
+            [ -z "$ID" ] && continue
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+              "$API_BASE/releases/$ID?access_token=$TOKEN" || true)
+            if [ "$CODE" = "200" ] || [ "$CODE" = "204" ] || [ "$CODE" = "404" ]; then
+              echo "    已删除 release $NAME (id=$ID)"
+            else
+              echo "    WARN 删除失败 ($CODE): $NAME (id=$ID)"
+            fi
+          done
+          echo "==> 清理完成，下面会重建当前版本的 release"
 
       - name: Upload to Gitee Release
         env:
@@ -136,7 +213,7 @@ jobs:
 
           # 2. Upload all assets (skip > 100MB for Gitee limit)
           #    curl 加超时 + 重试，避免上传挂起导致 job 无限空转
-          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.tar.xz" \) | while read -r f; do
+          find . -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.tar.xz" -o -name "mimocode-*" -o -name "SHA256SUMS" \) | while read -r f; do
             SIZE=$(stat -c%s "$f")
             if [ "$SIZE" -gt 104857600 ]; then
               echo "SKIP (>100MB): $f ($(( SIZE / 1048576 ))MB)"

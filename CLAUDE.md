@@ -6,7 +6,7 @@
 
 **MiMo Studio** —— [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)（一个具备工具调用/文件操作/终端执行能力的 AI 编码 Agent）的跨平台 Electron 桌面客户端。把 Agent 引擎封装成开箱即用的 GUI，国内用户优先走本项目码云 release 下载 CLI（官方镜像不同步 release 附件）。
 
-- 主仓库在 **Gitee**（`https://gitee.com/shdowzh/mimo-studio`），GitHub 是镜像 + CI 构建机。
+- 代码主仓库在 **Gitee**（`https://gitee.com/shdowzh/mimo-studio`，代码 + 国内下载源）；**发布仓在 GitHub `shdowzh888/mimo-studio`**（CI 构建 + Release + 自动更新 feed），旧镜像 `shdowzh/mimo-studio` 冻结在 v1.5.0。
 - 当前版本见 `package.json`；详细历史与架构决策见 `PROJECT.md`（63KB，很全）和 `UI-REDESIGN-PLAN.md`。
 
 ## 常用命令

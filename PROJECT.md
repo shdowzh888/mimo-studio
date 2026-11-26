@@ -1172,7 +1172,7 @@ window.__ZUSTAND__ = useChatStore.getState()
 **唯一发布链路 = GitHub Actions**（`.github/workflows/release.yml`）
 
 - `.gitee-ci.yml`（GiteeGo）已停用：只产 Linux 制品、缺 CLI 转存、缺 Windows 更新清单，且与 GitHub Actions 并行会在同一码云 release 上重复上传制品。
-- 发版：`git tag -a vX.X.X && git push github vX.X.X`（`github` remote = github.com/shdowzh/mimo-studio 镜像，与 origin(Gitee) 同 HEAD）。
+- 发版：`git tag -a vX.X.X && git push github vX.X.X`（`github` remote = github.com/shdowzh888/mimo-studio 发布仓；`origin` = Gitee 主仓库）。
 - 产物分工：GitHub Release 放多平台安装包 + `latest.yml`/`blockmap`（Windows 自动更新读它）；码云 release 只做国内下载分发，并托管转存的 CLI 归档。
 
 **码云 release job 的三个步骤**（`gitee-release`，顺序固定）
@@ -1202,6 +1202,14 @@ window.__ZUSTAND__ = useChatStore.getState()
   - 副作用：码云上只保留最新版 release 页面；历史版本安装包在 GitHub Release 仍有，CLI 回退 GitHub 上游；旧 tag 的 release 源码包链接失效（tag 与源码不受影响）。
   - 附带好处：当前版本重建为全新 release，重跑 workflow 不会撞同名附件。
   - 手工清理（无 CI 时）：码云 release 页面直接删 release，或 `DELETE /api/v5/repos/shdowzh/mimo-studio/releases/{id}?access_token=...`。
+
+**仓库与发布位置（2026-11-26 起）**
+
+- 代码主仓库 = Gitee `shdowzh/mimo-studio`（国内下载源）；**发布仓 = GitHub `shdowzh888/mimo-studio`**（GitHub Actions 构建 + GitHub Release + 自动更新 feed）。
+- 起因：原 GitHub 镜像 `shdowzh/mimo-studio` 的属主账号在本机取不到写权限 —— gh 的 `ghu_`（GitHub App 用户令牌）受 App 安装范围限制，既不能推代码也不能改协作者；故 v1.6.0 起改在 `shdowzh888` 名下发布。
+- 代价：v1.5.0 及更早版本的自动更新 feed 仍指向 `shdowzh/mimo-studio`，**老用户收不到 v1.6.0 的自动更新**，需手动下载；新版本 feed 随 `build.publish.owner` 指向新仓。
+- 新仓必须配置 `GITEE_TOKEN` 仓库密钥（码云私人令牌，projects 权限），否则 `gitee-release` job 失败 —— 码云 release 与 CLI 归档都不会产出。
+- 旧镜像 `shdowzh/mimo-studio` 冻结在 v1.5.0；等属主账号恢复写权限后，再把 main 与标签同步过去。
 
 **退出确认框行为约定**
 

@@ -140,7 +140,7 @@ Message
 | 样式 | Tailwind CSS 3 + CSS 变量主题 |
 | 构建 | Vite 6 + electron-builder |
 | 终端 | xterm.js 5 + PTY WebSocket / child_process |
-| Markdown | marked + DOMPurify + react-syntax-highlighter |
+| Markdown | marked + DOMPurify |
 | 本地存储 | better-sqlite3 |
 | 图标 | lucide-react |
 
@@ -166,13 +166,26 @@ mimo-studio/
 │   │   ├── directChat.ts        # 直连 Provider API fallback（OpenAI/Anthropic）
 │   │   ├── api.ts               # 便捷方法 + connectToServer
 │   │   ├── ipc.ts               # ElectronAPI 类型定义 + isElectron/getAPI
+│   │   ├── secret.ts            # API Key 读写封装（渲染层，走 secret IPC）
+│   │   ├── logger.ts            # 统一日志工具（分级 + 模块前缀）
 │   │   ├── types.ts             # 重导出 + 本地类型
-│   │   └── formatTime.ts        # 消息时间格式化
+│   │   ├── formatTime.ts        # 消息时间格式化
+│   │   ├── attachments.ts       # 附件工厂：path/clipboard → DraftAttachment
+│   │   ├── fileUrl.ts           # encodeFilePath：复刻上游文件路径编码
+│   │   ├── modelCapabilities.ts # 模型能力三态查询（yes/no/unknown）
+│   │   ├── errorTranslate.ts    # Provider 报错 → 中文友好提示
+│   │   ├── providerModels.ts    # Provider API 动态模型获取
+│   │   ├── recentPrompts.ts     # 最近 prompt 持久化
+│   │   ├── safeJson.ts          # JSON.parse 安全兜底
+│   │   └── *.test.ts            # 单测（attachments/directChat/errorTranslate/fileUrl/mimoClient/modelCapabilities）
 │   ├── stores/
-│   │   ├── chatStore.ts         # 核心：消息、Session、SSE 事件处理、发送
+│   │   ├── chatStore.ts         # 纯状态 + 薄 action（discriminated union 状态机）
+│   │   ├── chatFlow.ts          # 业务编排：sendMessage 三条路径分流
+│   │   ├── sseHandlers.ts       # SSE 事件 → Partial<ChatState> 纯函数（SSE_HANDLER_MAP）
 │   │   ├── themeStore.ts        # system / light / dark 三态主题
 │   │   ├── uiStore.ts           # 导航、侧边栏状态
-│   │   └── skillsStore.ts       # 技能全局状态（搜索/SkillsView 共享）
+│   │   ├── skillsStore.ts       # 技能全局状态（搜索/SkillsView 共享）
+│   │   └── *.test.ts            # 单测（chatStore/sseHandlers）
 │   ├── config/
 │   │   └── providerTemplates.ts # 8 个知名 Provider 模板
 │   ├── hooks/
@@ -190,6 +203,7 @@ mimo-studio/
 │   │   │   ├── ModelPicker.tsx   # 模型选择器
 │   │   │   ├── EmptyState.tsx    # 空状态
 │   │   │   ├── ToolCallCard.tsx  # 工具调用卡片
+│   │   │   ├── AttachmentChip.tsx # 草稿附件 chip（图片预览/扩展名徽章/⚠️ 能力提示）
 │   │   │   └── PermissionDialog.tsx # 权限确认对话框
 │   │   ├── TerminalView/        # xterm.js 终端
 │   │   ├── SkillsView/          # 技能浏览/下载
@@ -207,7 +221,7 @@ mimo-studio/
 │   │   │   └── GlobalSearch.tsx # ⌘K 全局搜索
 │   │   └── ui/                  # 通用组件 (Button/Input/Modal/Toast/Spinner/StatusDot/EmptyHint/ContextMenu/WindowControls)
 │   ├── styles/
-│   │   └── globals.css          # light/dark 主题 CSS 变量 + 通用样式
+│   │   └── globals.css          # light/dark CSS 变量 + mc-* token + 通用样式
 │   ├── App.tsx                  # 根组件
 │   └── main.tsx                 # 入口
 ├── build/                       # 应用图标
@@ -273,51 +287,79 @@ class MimoClient {
 
 **SSE 解析细节：**
 - 连接 `GET /global/event`，使用 `fetch` + `ReadableStream`
-- 心跳检测：15 秒无事件 → 自动重连（250ms 退避）
+- 心跳检测：15 秒无事件 → 自动重连（250ms 起指数退避，封顶 8s）
 - SyncEvent 解包：`{type:"sync", syncEvent:{type:"message.updated.v1", data:{...}}}` → 去除 `.v1` 后缀 → 转为 BusEvent 格式分发
 
 ### 6.2 chatStore.ts — 核心状态管理
 
 ```typescript
+// serverState 是 discriminated union，组件通过 selectors 派生，不直接比较 status 字符串
+type ServerState =
+  | { status: 'disconnected' }
+  | { status: 'connecting' | 'initializing' | 'ready'; port: number; password: string; mode: string }
+  | { status: 'error'; error: string; port: number; password: string; mode: string }
+
 interface ChatState {
-  serverConnected: boolean      // mimo serve 连接状态
+  serverState: ServerState       // mimo serve 连接状态机
   currentSessionID: string|null  // 当前会话
-  sessions: SessionInfo[]       // 本应用创建的 Session 列表
-  messages: Record<string, MessageWithParts[]>  // sessionID → messages
+  sessions: SessionInfo[]        // 本应用创建的 Session 列表
+  pinnedSessionIds: string[]     // 置顶会话 ID（存本地设置）
+  messages: Record<string, MessageWithParts[]>   // sessionID → messages
   sessionStatus: Record<string, SessionStatusInfo>  // idle/busy/retry
   permissionRequests: Record<string, PermissionRequest[]>
   sessionDiffs: Record<string, FileDiff[]>
+  draftAttachments: Record<string, DraftAttachment[]>  // 草稿附件（按 sessionID 索引，切换会话保留）
 
-  currentProvider: string       // 当前选中的 Provider
-  currentModel: string          // 当前选中的模型
+  currentProvider: string        // 当前选中的 Provider
+  currentModel: string           // 当前选中的模型
+  availableProviders: Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>
 
-  sendMessage(text): Promise<void>
-  initSSE(): () => void         // 注册 SSE 事件处理，返回 unsubscribe
+  // Actions：纯状态 + 薄入口，业务编排在 chatFlow.ts
+  sendMessage(text, attachments?): Promise<void>
+  abortSession(): Promise<void>
+  replyPermission(sessionID, permissionID, reply): Promise<void>
+  deleteSession(sessionID): Promise<void>
+  createSession(title?): Promise<SessionInfo | null>
+  renameSession(sessionID, title): Promise<void>
+  togglePinSession(sessionID): Promise<void>
   loadSessions(): Promise<void>
   loadMessages(sessionID): Promise<void>
+  initSSE(): () => void         // 注册 SSE 事件处理，返回 unsubscribe
 }
+
+// selectors（chatStore.ts 内置）：serverConnected / serverReady / isAgentMode / isInitializing /
+// isDirectMode / initError 等派生函数，组件禁用 status === 'ready' 字符串比较
 ```
 
-**sendMessage 双模式逻辑：**
+**sendMessage 三条路径（chatFlow.ts 的 sendMessageFlow 编排）：**
 ```
 用户发送消息
     ↓
-serverConnected && mimoClient.isConnected?
-    ├── YES → 创建服务端 Session → POST prompt_async → 等 SSE 推送
-    └── NO  → 检查 API Keys → directChat() 流式调用 → 本地更新消息
+chatStore.sendMessage → chatFlow.sendMessageFlow(text, attachments, abortController)
+    ├── ① Agent 模式（selectors.serverConnected && mimoClient.isConnected）
+    │     创建服务端 Session → POST prompt_async → 等 SSE 推送（工具调用/权限/文件 Diff）
+    ├── ② Fallback（serve 离线）→ directChat() 流式调用 → 本地更新消息
+    │     会话 ID 带 ephemeral- 前缀（刷新即丢，不入 DB）
+    └── ③ 错误消费后不自动降级，避免重复副作用
 ```
 
 **SSE 事件 → Store 映射：**
 
 | SSE 事件 | Store 操作 |
 |----------|-----------|
-| `message.part.delta` | 增量追加 part.text |
-| `message.part.updated` | 替换/插入 part |
-| `message.updated` | 创建/更新消息 |
-| `session.status` | 更新 busy/idle 状态 |
-| `permission.asked` | 添加到 permissionRequests |
+| `message.part.delta` | 增量追加 part.text（rAF 批量合并：同一 part 的多次 delta 合并后一次 set） |
+| `message.part.updated` | 替换/插入 part（消息容器不存在时先建占位消息） |
+| `message.part.removed` | 删除 part |
+| `message.updated` | 创建/更新消息 info |
+| `message.removed` | 删除消息 |
+| `session.created` / `session.updated` / `session.deleted` | 会话列表增改删（deleted 同时清 messages/status） |
+| `session.status` / `session.idle` | 更新 busy/idle 状态 |
 | `session.diff` | 存储文件变更 |
-| `session.error` | 显示错误提示 |
+| `session.error` | 错误转译 + 显示提示 |
+| `permission.asked` / `permission.replied` | 权限请求增删 |
+| `server.connected` | 触发 pollUntilReady：轮询 listSkills 直到 ready 或 30s 超时 |
+
+> 处理器集中在 `sseHandlers.ts` 的 `SSE_HANDLER_MAP`（纯函数，返回 `Partial<ChatState>`），`chatStore.initSSE()` 只负责注册 + rAF 批量机制。
 
 ### 6.3 MessageBubble.tsx — Part 多态渲染
 
@@ -358,9 +400,9 @@ parts 列表
 ```
 用户输入 "帮我创建一个 React 组件"
     ↓
-MessageInput → chatStore.sendMessage(text)
+MessageInput → chatStore.sendMessage → chatFlow.sendMessageFlow（三条路径编排）
     ↓
-serverConnected? YES
+selectors.serverConnected? YES（Agent 模式）
     ↓
 mimoClient.createSession({title}) → POST /session → 返回 SessionInfo
     ↓
@@ -387,13 +429,11 @@ MessageBubble 重渲染，显示每一步的工具调用和文本输出
 ```
 用户输入 "你好"
     ↓
-store.sendMessage(text)
+chatFlow.sendMessageFlow → selectors.serverConnected? NO（fallback 模式）
     ↓
-serverConnected? NO
+创建 ephemeral- 会话 → 注入 USER.md/MEMORY.md/Skills 为 system context
     ↓
-loadConfiguredKeys() → 获取已配置的 API Keys
-    ↓
-directChat(providerId, modelId, messages, callbacks)
+同步当前 Provider 的 API Key → directChat(providerId, modelId, messages, callbacks)
     ├── OpenAI: fetch POST /chat/completions (stream:true) → SSE 解析
     └── Anthropic: fetch POST /messages (stream:true) → SSE 解析
     ↓
@@ -474,7 +514,7 @@ onDone → store 写入完整消息 + idle 状态
 | `permission.asked` | 权限请求 |
 | `permission.replied` | 权限回复 |
 | `server.connected` | 初始连接确认 |
-| `server.heartbeat` | 心跳（10s 间隔） |
+| `server.heartbeat` | 服务端心跳（约 10s 间隔）；客户端侧 15s 无事件判定断开并重连 |
 
 ### 8.3 Electron IPC 通道
 
@@ -622,7 +662,7 @@ onDone → store 写入完整消息 + idle 状态
 
 **新建/修改文件：**
 - `build/icon.png` — 256×256 → 1024×1024
-- `electron/services/mimoInstaller.cjs` — `installFromBundled()` + Gitee 镜像 + 已安装检测
+- `electron/services/mimoInstaller.cjs` — `installFromBundled()` + 本项目码云 release 下载 + 已安装检测
 - `electron/services/streaming.cjs` — CLI 不存在时自动从内置安装
 - `src/lib/api.ts` — `connectToServer()` 改为非阻塞
 - `src/stores/chatStore.ts` — `serverReady` 状态 + 初始化完成自动加载 sessions/skills
@@ -969,7 +1009,7 @@ open MiMo\ Studio.app
 
 **首次启动**
 1. 显示欢迎引导 → 点击"开始使用"
-2. 自动检测/安装 MiMo CLI（无内置二进制，从码云镜像下载 → GitHub → npm 回退）
+2. 自动检测/安装 MiMo CLI（无内置二进制，从本项目码云 release 下载 → GitHub 上游 → npm 回退）
 3. MiMo Serve 初始化期间显示蓝色"正在初始化"横幅
 4. 初始化完成后自动切换为绿色"Agent 模式"
 
@@ -994,15 +1034,15 @@ open MiMo\ Studio.app
 - 顶栏显示当前对话标题
 
 **选择模型**
-- 顶栏右侧下拉：
+- 输入框底部工具栏的模型选择器（`ModelPicker`）：
   - 在线时所有模型统一经 MiMo Code，享受完整 Agent 能力
   - 离线时仅显示已配置 API Key 的外部模型（纯文本模式）
-  - 底部"管理 Provider 配置"→ 跳转到设置页
+  - 下拉底部"管理 Provider 配置"→ 跳转到设置页
 - 设置 → Provider 中可随时安装 MiMo CLI
 
 ### 10.3 配置外部 AI Provider
 
-1. 点击顶栏模型下拉 → "管理 Provider 配置"
+1. 点击输入框底部模型选择器 → "管理 Provider 配置"
 2. 或点击左侧"设置"→ Provider 标签
 3. 在卡片中输入对应 Provider 的 API Key
 4. Key 安全存储于本地，仅用于 API 调用
@@ -1083,11 +1123,10 @@ npm run electron:build
 3. 如果是工具类 Part → `ToolCallCard.tsx`
 
 **添加新的 SSE 事件处理：**
-`src/stores/chatStore.ts` → `initSSE()` 中添加 `mimoClient.on('event.type', handler)`
+`src/stores/sseHandlers.ts` → 在 `SSE_HANDLER_MAP` 注册 `事件类型 → handler`（纯函数，返回 `Partial<ChatState>`）
 
 **添加新的 Provider 模板：**
-`src/config/providerTemplates.ts` → `PROVIDER_TEMPLATES` 数组添加条目
-`src/views/SettingsView/index.tsx` → `PROVIDER_CARDS` 数组添加卡片
+`src/config/providerTemplates.ts` → `PROVIDER_TEMPLATES` 数组添加条目（填模板即可在设置页出现，无需改别处）
 
 **修改 Electron IPC：**
 1. `electron/main.cjs` → 添加 `ipcMain.handle('channel', handler)`
@@ -1113,13 +1152,54 @@ window.__ZUSTAND__ = useChatStore.getState()
 
 ### 11.4 项目约定
 
-- 组件类名使用 `mc-*` 前缀（MiMo Code）
-- CSS 变量命名：`--bg-base`, `--text-primary`, `--accent` 等
+- 颜色一律走 `mc-*` 语义 token（`bg-mc-bg` / `text-mc-text` / `border-mc-border` 等），禁止写死色值
+- token 两层结构：Tailwind `mc.*` 颜色类（tailwind.config.js）→ 底层 CSS 变量（globals.css 的 `:root` / `[data-theme]`：`--bg-*` / `--text-*` / `--accent*` / `--brand-*`）
+- 字号收敛 `text-2xs(11) / xs(12) / sm(13) / base(14) / lg(16)`，禁止 `text-[Npx]`；圆角分级 4/6/8/12px
 - IPC 通道命名：`namespace:verb`（如 `mimo:startServer`, `settings:get`）
 - 文件命名：Component PascalCase / module camelCase
 - 类型优先从 `mimoTypes.ts` 导入，`types.ts` 仅重导出 + 本地类型
 
----
+### 11.5 技术债务（截至 v1.5.0）
+
+- **遗留依赖**：`react-virtuoso`（V7 移除虚拟滚动后 src 零引用）、`react-router-dom`（从未使用）仍在 package.json 依赖里，待清理
+- **lint warning 99 条**（多为 `any` + exhaustive-deps）：按"宽松模式、逐步收紧"策略处理（eslint.config.js 注释），warning 清零另开议题
+- **无 e2e/集成测试**：打包后行为（协议加载、SSE、更新器）依赖文档中的手动验证清单
+- **正文同步滞后**：本文件 1–11 节曾长期滞后于 changelog（2026-08-13 已同步一轮），changelog 仍是权威信息源
+- **安全取舍**：`webSecurity:false`（上游 CORS 白名单所迫）与 serve 空密码（SSE 端点契约）为已知低风险取舍，评估见 v1.3.1 记录
+
+### 11.6 发布与退出行为约定（2026-11-26 定稿）
+
+**唯一发布链路 = GitHub Actions**（`.github/workflows/release.yml`）
+
+- `.gitee-ci.yml`（GiteeGo）已停用：只产 Linux 制品、缺 CLI 转存、缺 Windows 更新清单，且与 GitHub Actions 并行会在同一码云 release 上重复上传制品。
+- 发版：`git tag -a vX.X.X && git push github vX.X.X`（`github` remote = github.com/shdowzh/mimo-studio 镜像，与 origin(Gitee) 同 HEAD）。
+- 产物分工：GitHub Release 放多平台安装包 + `latest.yml`/`blockmap`（Windows 自动更新读它）；码云 release 只做国内下载分发，并托管转存的 CLI 归档。
+
+**MiMo CLI 归档转存（国内下载源）**
+
+- CI 从上游 `XiaomiMiMo/MiMo-Code` 的固定 tag（`MIMO_CLI_VERSION`，当前 v0.1.17）拉归档，转存到本项目同名 tag 的码云 release；安装器按应用版本（`app.getVersion()`）寻址，CLI 版本由 CI 固定。
+- **版本号必须真实存在** —— 填一个上游没有的 tag 会让 curl 404 → 整个发版 job 挂掉。
+- 上游为 **MIT** 许可：再分发二进制必须附带许可声明，CI 一并转存 `mimocode-LICENSE.txt`。
+- 覆盖平台 = 应用实际发布的平台：`windows-x64` / `darwin-arm64` / `darwin-x64`（macOS 同时发 x64 与 arm64）/ `linux-x64`。
+- 校验：同 release 下 `SHA256SUMS`，有则强校验、无则记录哈希放行（fail-open 取舍，上游源本身没有 sums）。
+- **配额与清理**：码云附件总配额 1GB，应用制品约 400MB + CLI 归档 157MB ≈ 560MB/版本，**装不下两个版本**。
+  - `gitee-release` job 的第一个步骤就是清理：**发版前删掉本仓库的全部 release 记录**，再重建当前版本。
+  - 原因：码云 API v5 **没有"删除单个附件"的端点**（`DELETE /releases/{id}/attach_files/{name}` 实测 404），只能整体删 release（`DELETE /releases/{id}` 可用）。
+  - 副作用：码云上只保留最新版 release 页面；历史版本安装包在 GitHub Release 仍有，CLI 回退 GitHub 上游；旧 tag 的 release 源码包链接失效（tag 与源码不受影响）。
+  - 附带好处：当前版本重建为全新 release，重跑 workflow 不会撞同名附件。
+  - 手工清理（无 CI 时）：码云 release 页面直接删 release，或 `DELETE /api/v5/repos/shdowzh/mimo-studio/releases/{id}?access_token=...`。
+
+**退出确认框行为约定**
+
+- 窗口关闭按钮（X）→ **弹确认框**（保留产品决策，不改成静默退出）。
+- 程序化退出（Cmd+Q / 自动更新 `quitAndInstall`）→ **静默退出不弹框**：自动更新重装必须能直接退出，macOS 惯例亦如此。
+- `before-quit` 先置 `isQuitting` 再 `cleanupAll()`：目的是避免 close 事件重复弹框、`cleanupAll()` 双跑（双跑才是真 bug），不是为了让所有退出路径都静默。
+
+**SSE 连接生命周期**（`src/lib/mimoClient.ts`）
+
+- `connect()` 语义 = 开启一段新连接：必须先 abort 上一条 SSE 流（否则旧流的 `abortController` 被覆盖成孤儿，新旧两条流同时推送事件 = 事件双发），并重置 `connecting`/`connected`。
+- `startSSE()` 带"身份标记" `isCurrent()`：被更新连接取代的旧流在成功路径、事件分发、流结束、异常四个出口都不再改共享状态。
+- `connect()` 内联回调与 `onConnectionChange()` 公共订阅分两个集合管理：前者在重连时被清空，避免回调无限累积导致重复下发 API Key。
 
 ---
 
@@ -1168,6 +1248,8 @@ window.__ZUSTAND__ = useChatStore.getState()
 **测试覆盖：**
 - 新增 21 个用例（modelCapabilities 11 + errorTranslate 10）
 - 全部测试：60 passed | 1 skipped（v1.4.0 是 39 passed | 1 skipped）
+
+## v1.4.0 — 聊天附件（feat）
 
 **背景：** V1.3.x 只支持纯文本输入，无法向 AI 传递文件上下文（代码片段、截图、日志等）。MiMo Code 上游已支持多模态 Part（`FilePartInput`：`data:` base64 内联图片 + `file://` 路径引用文本），客户端缺的是完整的附件收集 → 草稿管理 → 发送编排链路。
 

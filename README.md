@@ -33,7 +33,7 @@ MiMo Studio 是 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的跨平�
 - **技能管理** — 可视化管理 AI 行为规则，支持从商店下载
 - **记忆编辑** — 用户画像 + 项目记忆，Markdown 实时编辑
 - **本地优先** — API Key 存储于本地 SQLite，不上传任何第三方
-- **智能 CLI 安装** — 首次启动自动下载 MiMo CLI（优先码云镜像 Gitee → GitHub → npm），无需手动配置
+- **智能 CLI 安装** — 首次启动自动下载 MiMo CLI（优先本项目码云 release → GitHub 上游 → npm），无需手动配置
 
 ## 版本历史
 
@@ -89,6 +89,7 @@ MiMo Studio 是 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的跨平�
 ### 下载预编译包
 
 > **码云**（国内快）：单文件 ≤100MB 的制品；**GitHub**（全量）：含 DMG / AppImage / deb 等大文件。
+> **码云只保留最新版** —— 码云附件总配额仅 1GB，发新版时旧 release 会被自动清理腾空间；**历史版本请用 GitHub Releases**（永久保留）。
 
 | 平台 | 码云（Gitee） | GitHub |
 |------|--------------|--------|
@@ -97,7 +98,7 @@ MiMo Studio 是 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的跨平�
 | 🍎 **macOS** (Apple Silicon) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-arm64.tar.xz) (~70MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-arm64.tar.xz) / [DMG](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-arm64.dmg) |
 | 🍎 **macOS** (Intel) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-x64.tar.xz) (~77MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-x64.tar.xz) / [DMG](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-x64.dmg) |
 
-> **全部版本**：浏览 [Gitee Releases](https://gitee.com/shdowzh/mimo-studio/releases) 或 [GitHub Releases](https://github.com/shdowzh/mimo-studio/releases)。<br>
+> **历史版本**：码云只保留最新版，旧版本请到 [GitHub Releases](https://github.com/shdowzh/mimo-studio/releases) 下载（永久保留）。<br>
 > **macOS 用户**：首次打开提示"无法验证开发者"→ 系统设置 → 隐私与安全性 → 仍要打开。
 
 ### 从源码构建
@@ -111,20 +112,20 @@ cp .npmrc.example .npmrc   # 或手动创建 .npmrc 添加镜像配置
 
 npm install
 npm run electron:dev          # 开发模式（Vite + Electron 热重载）
-npm run electron:build:win    # 构建 Windows (exe + portable tar.xz)
+npm run electron:build:win    # 构建 Windows 安装包 (NSIS exe)
 npm run electron:build:mac    # 构建 macOS (DMG + tar.xz)
 npm run electron:build:linux  # 构建 Linux (AppImage + deb + tar.xz)
 npm run electron:build:all    # 构建全部平台
 ```
 
-> **关于 MiMo CLI**：安装包不内置 CLI 二进制（体积过大无法上传码云），用户首次启动时自动从码云镜像/GitHub 下载。
+> **关于 MiMo CLI**：安装包不内置 CLI 二进制（四平台合计约 157MB，超过码云单文件 100MB 限制），用户首次启动时自动下载 —— 优先本项目码云 release → GitHub 上游 → npm 装到用户目录再提取。
 
 ## 使用
 
 ### 首次启动
 
 1. 启动后进入引导程序 → 点击"开始使用"
-2. 自动检测/安装 MiMo CLI（优先码云 Gitee 镜像下载，国内快；失败则回退 GitHub → npm）
+2. 自动检测/安装 MiMo CLI（优先本项目码云 release 下载，国内快；失败则回退 GitHub 上游 → npm）
 3. MiMo Serve 初始化期间显示蓝色"正在初始化"横幅，完成后自动切换为 Agent 模式
 
 ### 基础聊天
@@ -206,7 +207,7 @@ npm run electron:build  # 构建桌面安装包
 ## 相关项目
 
 - [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) — 上游项目，Agent 引擎
-- [MiMo Code 镜像](https://gitee.com/mirrors/mimocode) — Gitee 镜像，国内下载快
+- [MiMo Code Releases](https://github.com/XiaomiMiMo/MiMo-Code/releases) — 上游 CLI 二进制下载（国内走本项目码云 release，见上方安装说明）
 
 ## License
 

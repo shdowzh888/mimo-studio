@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
-  <a href="https://gitee.com/shdowzh/mimo-studio/releases"><img src="https://img.shields.io/badge/release-v1.5.0-green.svg" /></a>
+  <a href="https://gitee.com/shdowzh/mimo-studio/releases"><img src="https://img.shields.io/badge/release-v1.6.0-green.svg" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg" />
 </p>
 
@@ -36,6 +36,15 @@ MiMo Studio 是 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的跨平�
 - **智能 CLI 安装** — 首次启动自动下载 MiMo CLI（优先本项目码云 release → GitHub 上游 → npm），无需手动配置
 
 ## 版本历史
+
+### V1.6.0 — 安全加固 + 发版链路打通
+
+- **🛡️ CSP 内容安全策略**：渲染层启用 `script-src 'self'` 严格模式；白屏诊断脚本外置为独立文件，Inter 字体本地化打包（不再依赖外部 CDN）
+- **🔗 外链管控**：markdown 外链交给系统浏览器打开，不再另开继承 `webSecurity:false` + preload 权限的新窗口
+- **📦 CLI 国内下载源**：MiMo CLI 预编译归档由 CI 转存到本项目码云 release，首次启动下载走国内网络（校验 SHA256）
+- **🔁 SSE 连接修复**：修掉重连时旧流未中止导致的**事件双发**，以及连接回调泄漏引发的 **API Key 重复下发**
+- **🚦 CI 质量门**：修复失效的 typecheck 门（`| true` 吞退出码导致永远绿）；发布流程补齐 Windows 自动更新清单，并新增发版前自动清理旧 release（码云 1GB 配额）
+- **🧹 Provider 模板换代**：按官方文档更新在售模型 ID，新增豆包 / MiniMax / 混元 / OpenCode Zen
 
 ### V1.5.0 — 任意文件附件 + 模型能力提示
 
@@ -93,10 +102,10 @@ MiMo Studio 是 [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) 的跨平�
 
 | 平台 | 码云（Gitee） | GitHub |
 |------|--------------|--------|
-| 🪟 **Windows** (x64) | [⬇ exe 安装包](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-Setup-1.5.0-win-x64.exe) (~86MB) | [⬇ exe 安装包](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-Setup-1.5.0-win-x64.exe) (~86MB) |
-| 🐧 **Linux** (x64) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-linux-x64.tar.xz) (~77MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-linux-x64.tar.xz) / [deb](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-linux-amd64.deb) / [AppImage](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-linux-x86_64.AppImage) |
-| 🍎 **macOS** (Apple Silicon) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-arm64.tar.xz) (~70MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-arm64.tar.xz) / [DMG](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-arm64.dmg) |
-| 🍎 **macOS** (Intel) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-x64.tar.xz) (~77MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-x64.tar.xz) / [DMG](https://github.com/shdowzh/mimo-studio/releases/download/v1.5.0/MiMo-Studio-1.5.0-mac-x64.dmg) |
+| 🪟 **Windows** (x64) | [⬇ exe 安装包](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-Setup-1.6.0-win-x64.exe) (~86MB) | [⬇ exe 安装包](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-Setup-1.6.0-win-x64.exe) (~86MB) |
+| 🐧 **Linux** (x64) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-linux-x64.tar.xz) (~77MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-linux-x64.tar.xz) / [deb](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-linux-amd64.deb) / [AppImage](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-linux-x86_64.AppImage) |
+| 🍎 **macOS** (Apple Silicon) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-mac-arm64.tar.xz) (~70MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-mac-arm64.tar.xz) / [DMG](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-mac-arm64.dmg) |
+| 🍎 **macOS** (Intel) | [⬇ tar.xz](https://gitee.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-mac-x64.tar.xz) (~77MB) | [⬇ tar.xz](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-mac-x64.tar.xz) / [DMG](https://github.com/shdowzh/mimo-studio/releases/download/v1.6.0/MiMo-Studio-1.6.0-mac-x64.dmg) |
 
 > **历史版本**：码云只保留最新版，旧版本请到 [GitHub Releases](https://github.com/shdowzh/mimo-studio/releases) 下载（永久保留）。<br>
 > **macOS 用户**：首次打开提示"无法验证开发者"→ 系统设置 → 隐私与安全性 → 仍要打开。

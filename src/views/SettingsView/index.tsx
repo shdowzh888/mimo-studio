@@ -248,7 +248,7 @@ function ProvidersTab() {
         <h3 className="text-sm font-medium text-mc-text mb-1">外部 Provider</h3>
         <p className="text-2xs text-mc-text-muted mb-3">填入 API Key 后自动获取可用模型列表。Key 安全存储于本地。</p>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {PROVIDER_TEMPLATES.slice(0, 7).map((tpl) => (
+          {PROVIDER_TEMPLATES.map((tpl) => (
             <ProviderCard
               key={tpl.id}
               template={tpl}

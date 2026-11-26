@@ -4,15 +4,17 @@ import { modelSupports } from './modelCapabilities'
 
 describe('modelSupports — vision', () => {
   it('PROVIDER_TEMPLATES 显式声明 vision → yes', () => {
-    expect(modelSupports('openai', 'gpt-4o', 'vision')).toBe('yes')
-    expect(modelSupports('anthropic', 'claude-sonnet-4-6', 'vision')).toBe('yes')
-    expect(modelSupports('openai', 'o3', 'vision')).toBe('yes')
+    expect(modelSupports('openai', 'gpt-5.6-terra', 'vision')).toBe('yes')
+    expect(modelSupports('anthropic', 'claude-sonnet-5', 'vision')).toBe('yes')
+    expect(modelSupports('openai', 'gpt-5.6-sol', 'vision')).toBe('yes')
+    // qwen3.5-omni-plus 虽命中 /^qwen3-/ NO 规则，模板显式声明 vision 优先
+    expect(modelSupports('alibaba', 'qwen3.5-omni-plus', 'vision')).toBe('yes')
   })
 
   it('PROVIDER_TEMPLATES 声明了 capabilities 但未含 vision → no', () => {
-    expect(modelSupports('deepseek', 'deepseek-chat', 'vision')).toBe('no')
-    expect(modelSupports('alibaba', 'qwen3-235b-a22b', 'vision')).toBe('no')
-    expect(modelSupports('moonshot', 'moonshot-v1-128k', 'vision')).toBe('no')
+    expect(modelSupports('deepseek', 'deepseek-v4-flash', 'vision')).toBe('no')
+    expect(modelSupports('alibaba', 'qwen3.5-plus', 'vision')).toBe('no')
+    expect(modelSupports('moonshot', 'kimi-k2.6', 'vision')).toBe('no')
   })
 
   it('启发式：claude/gpt-4o/-vl-/-vision 后缀 → yes（即使不在模板里）', () => {
@@ -48,13 +50,13 @@ describe('modelSupports — reasoning', () => {
   it('o-series / r1 / qwq / reasoner 命名命中', () => {
     expect(modelSupports('custom', 'o3', 'reasoning')).toBe('yes')
     expect(modelSupports('custom', 'o4-mini', 'reasoning')).toBe('yes')
-    expect(modelSupports('deepseek', 'deepseek-reasoner', 'reasoning')).toBe('yes')
+    expect(modelSupports('deepseek', 'deepseek-v4-pro', 'reasoning')).toBe('yes')
     expect(modelSupports('groq', 'qwen-qwq-32b', 'reasoning')).toBe('yes')
   })
 
   it('普通对话模型不声明 reasoning → no（模板显式）/ unknown（启发式）', () => {
-    // 模板里 gpt-4o 的 capabilities 不含 reasoning，应该返回 no
-    expect(modelSupports('openai', 'gpt-4o', 'reasoning')).toBe('no')
+    // 模板里 gpt-5.6-terra 的 capabilities 不含 reasoning，应该返回 no
+    expect(modelSupports('openai', 'gpt-5.6-terra', 'reasoning')).toBe('no')
     expect(modelSupports('custom', 'gpt-3.5-turbo', 'reasoning')).toBe('unknown')
   })
 })

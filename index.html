@@ -13,31 +13,9 @@
     <div id="mimo-loading">MiMo Studio 加载中...</div>
     <div id="mimo-error"></div>
     <div id="root"></div>
-    <script>
-      // 全局错误捕获 — 在黑屏时至少能看到错误信息
-      window.__MIMO_ERRORS__ = []
-      function showError(msg) {
-        window.__MIMO_ERRORS__.push(msg)
-        var el = document.getElementById('mimo-error')
-        el.style.display = 'block'
-        el.textContent = window.__MIMO_ERRORS__.join('\n')
-        var load = document.getElementById('mimo-loading')
-        if (load) load.style.display = 'none'
-      }
-      window.addEventListener('error', function(e) {
-        showError((e.target.tagName || '') + ' ' + (e.target.src || e.target.href || '') + ' ' + (e.message || 'load failed'))
-      }, true)
-      window.onerror = function(msg, src, line, col, err) {
-        showError('JS Error: ' + msg + '\n  at ' + src + ':' + line + ':' + col)
-      }
-      // 3秒后如果 React 还没渲染（root 还是空的），显示诊断信息
-      setTimeout(function() {
-        var root = document.getElementById('root')
-        if (root && root.children.length === 0) {
-          showError('React 未渲染 — root 元素为空\nUserAgent: ' + navigator.userAgent)
-        }
-      }, 3000)
-    </script>
+    <!-- 错误捕获脚本外置：CSP script-src 'self' 禁止内联脚本。相对路径 ./ 保证打包后
+         （mimo-app://app/dist/index.html）解析到 dist/error-catcher.js -->
+    <script src="./error-catcher.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

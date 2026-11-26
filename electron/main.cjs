@@ -53,7 +53,8 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       corsEnabled: true,
-      bypassCSP: true,
+      // 注意：不带 bypassCSP —— 该特权会绕过 CSP 检查，与协议 handler 下发的 CSP 策略冲突。
+      // 首方资源由 CSP 的 'self' 放行，删除此特权不影响任何现有行为（见 .omo/plans/security-csp.md）
     },
   },
 ])
@@ -119,6 +120,13 @@ function createWindow() {
     if (url.startsWith('mimo-app://') || url.startsWith('http://localhost:5173')) return
     event.preventDefault()
     debugLog(`will-navigate blocked: ${url}`)
+  })
+
+  // 聊天 markdown 里的 target=_blank 外链：用系统浏览器打开，拒绝另开窗口。
+  // 否则新窗口会继承 webSecurity:false + preload，等于一个共享权限的未拦截窗口
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url).catch((err) => debugError(`openExternal failed: ${url}: ${err.message}`))
+    return { action: 'deny' }
   })
 
   mainWindow.once('ready-to-show', () => {
@@ -401,6 +409,27 @@ app.whenReady().then(async () => {
   // === 注册自定义协议 handler（必须在 app.whenReady 之后，否则 Session not ready） ===
   // file:// 协议缺少 CORS 头，ES module 脚本会被 Chromium 拦截 → 白屏/黑屏
   // mimo-app:// 协议在每次请求中都附带 Access-Control-Allow-Origin 头
+  // CSP 也在此下发（对文档生效）：webSecurity:false 是上游 CORS 白名单所迫的取舍，
+  // CSP 作为纵深防御把 XSS 注入脚本拦在源头（script-src 无 'unsafe-inline'）。
+  // 注意：registerSchemesAsPrivileged 中不能带 bypassCSP，否则此策略被绕过。
+  const CSP_HEADER = [
+    "default-src 'self'",
+    "script-src 'self'",
+    // React style prop / xterm 内联样式需要 style 属性放行，无法避免
+    "style-src 'self' 'unsafe-inline'",
+    // 附件图片与终端下拉箭头均为 data: URI
+    "img-src 'self' data:",
+    // SSE / PTY WebSocket：mimo serve 端口动态，用端口通配覆盖。
+    // https: 必须放行 —— directChat 离线直连各 Provider API、模型列表拉取、
+    // 技能商店下载均为渲染端发起的外部 HTTPS 请求，收紧到白名单会全部被拦。
+    // 本地推理服务（Ollama 等）默认走 localhost 明文 HTTP，一并放行；
+    // 局域网明文 HTTP 自定义端点仍会被拦（罕见场景，出现需求再加 scheme）。
+    "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ')
   protocol.handle('mimo-app', (request) => {
     const url = new URL(request.url)
     // pathname 以 / 开头（如 /dist/index.html），去掉前导 / 避免 Windows 上被当绝对路径
@@ -442,6 +471,7 @@ app.whenReady().then(async () => {
         headers: {
           'Content-Type': mime,
           'Access-Control-Allow-Origin': '*',
+          'Content-Security-Policy': CSP_HEADER,
         },
       })
     } catch (err) {
@@ -529,7 +559,12 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  if (!isQuitting) cleanupAll()
+  if (!isQuitting) {
+    // Cmd+Q / autoUpdater.quitAndInstall 走这里：先置位再清理，避免随后的 close
+    // 事件再次拦截弹确认框、cleanupAll 双跑
+    isQuitting = true
+    cleanupAll()
+  }
 })
 
 // === 自动更新 ===

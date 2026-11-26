@@ -89,13 +89,14 @@
     color: var(--text-primary);
   }
 
-  /* Inter font - 沿用现有 CDN，PR1 暂不本地化（需要打包字体资产，留给后续 PR） */
+  /* Inter font - 本地打包（woff2 可变字体）：CSP 严格模式（font-src 'self'）不放行外部字体 CDN，
+     且离线可用。原 CDN 方案见 git 历史 globals.css。 */
   @font-face {
     font-family: 'Inter';
     font-style: normal;
     font-weight: 100 900;
     font-display: swap;
-    src: url('https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiJ-Ek-_EeA.woff2') format('woff2');
+    src: url('./fonts/Inter-var.woff2') format('woff2');
   }
 
   /* Selection */
